@@ -285,4 +285,40 @@ sha256 = "{checksum}"
 
         assert_eq!(fs::read(wrapper).unwrap(), updated_content);
     }
+
+    #[test]
+    fn wrapper_rejects_unsafe_locked_binloom_version() {
+        let directory = tempfile::tempdir().unwrap();
+        let wrapper = directory.path().join("binloomw");
+        let platform = Platform::current().unwrap();
+
+        generate_binloomw(&wrapper).unwrap();
+
+        fs::write(
+            directory.path().join("binloom.lock"),
+            format!(
+                r#"lock-version = 1
+
+[binloom]
+version = "../../escaped"
+
+[binloom.artifacts.{platform}]
+url = "file:///does-not-matter"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+format = "raw"
+"#
+            ),
+        )
+        .unwrap();
+
+        let output = Command::new(&wrapper).output().unwrap();
+
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8(output.stderr)
+                .unwrap()
+                .contains("unsafe Binloom version")
+        );
+        assert!(!directory.path().join(".tools").exists());
+    }
 }

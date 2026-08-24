@@ -6,7 +6,13 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 
-use crate::{install, manifest::Manifest, sources::Source, update};
+use crate::{
+    common::{validate_tool_name, validate_version},
+    install,
+    manifest::Manifest,
+    sources::Source,
+    update,
+};
 
 pub fn add(name: &str, source: &str, version: &str) -> Result<()> {
     write_tool(Path::new("binloom.toml"), name, source, version)?;
@@ -17,20 +23,8 @@ pub fn add(name: &str, source: &str, version: &str) -> Result<()> {
 }
 
 fn write_tool(path: &Path, name: &str, source: &str, version: &str) -> Result<()> {
-    ensure!(
-        !name.is_empty()
-            && name
-                .chars()
-                .all(|character| character.is_ascii_alphanumeric()
-                    || character == '-'
-                    || character == '_'),
-        "invalid tool name: {name}"
-    );
-
-    ensure!(
-        !version.is_empty() && version.trim() == version,
-        "invalid tool version"
-    );
+    validate_tool_name(name)?;
+    validate_version(version)?;
 
     let manifest = Manifest::try_from(path)?;
     ensure!(

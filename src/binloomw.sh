@@ -131,6 +131,14 @@ if [ -n "${LOCKED_WRAPPER_VERSION}${WRAPPER_URL}${WRAPPER_SHA256}" ]; then
     fi
 fi
 
+validate_version() {
+    case "$1" in
+        "" | "." | ".." | .* | */* | *\\* | [[:space:]]* | *[[:space:]])
+            return 1
+            ;;
+    esac
+}
+
 VERSION=$(read_lock_value "binloom" "version")
 ARTIFACT_SECTION="binloom.artifacts.$PLATFORM"
 URL=$(read_lock_value "$ARTIFACT_SECTION" "url")
@@ -141,7 +149,10 @@ if [ -z "$VERSION" ] || [ -z "$URL" ] || [ -z "$SHA256" ] || [ -z "$FORMAT" ]; t
     echo "error: incomplete Binloom lock data for $PLATFORM" >&2
     exit 1
 fi
-
+if ! validate_version "$VERSION"; then
+    echo "error: unsafe Binloom version in lockfile: $VERSION" >&2
+    exit 1
+fi
 INSTALL_DIR="$ROOT_DIR/.tools/binloom/$VERSION"
 BINLOOM="$INSTALL_DIR/binloom"
 

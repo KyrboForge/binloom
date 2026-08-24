@@ -3,6 +3,7 @@ use std::path::Path;
 
 use crate::lockfile::{ArtifactFormat, LockedArtifact, LockedTool, LockedWrapper, Lockfile};
 use crate::{
+    common::validate_version,
     download,
     manifest::{self, Manifest, Tool},
     platform::Platform,
@@ -140,6 +141,15 @@ fn resolve_checksum(
     }
 }
 
+fn version_from_tag(tag: &str) -> Result<String> {
+    let version = tag.strip_prefix('v').unwrap_or(tag);
+
+    validate_version(version)
+        .with_context(|| format!("release tag {tag} contains an unsafe version"))?;
+
+    Ok(version.to_owned())
+}
+
 fn resolve_release(
     name: &str,
     source: &Source,
@@ -166,11 +176,7 @@ fn resolve_release(
     }
 
     Ok(LockedTool {
-        version: release
-            .tag
-            .strip_prefix('v')
-            .unwrap_or(&release.tag)
-            .to_owned(),
+        version: version_from_tag(&release.tag)?,
         source: source.to_string(),
         tag: release.tag.clone(),
         artifacts,
@@ -353,5 +359,15 @@ mod tests {
         assert_eq!(fresh.binloom.as_ref().unwrap().version, "0.1.0");
         assert_eq!(fresh.wrapper.as_ref().unwrap().version, "0.1.1");
         assert!(fresh.tools.is_empty());
+    }
+
+    #[test]
+    fn rejects_unsafe_release_tags() {
+        assert_eq!(version_from_tag("v1.2.3").unwrap(), "1.2.3");
+        assert_eq!(version_from_tag("1.2.3").unwrap(), "1.2.3");
+
+        for tag in ["v/tmp/x", "v../../x", r"v..\..\x", "v.hidden"] {
+            assert!(version_from_tag(tag).is_err(), "{tag:?}");
+        }
     }
 }

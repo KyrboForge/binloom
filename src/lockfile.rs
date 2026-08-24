@@ -1,3 +1,4 @@
+use crate::common::{validate_tool_name, validate_version};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -70,6 +71,7 @@ impl TryFrom<&Lockfile> for String {
     type Error = anyhow::Error;
 
     fn try_from(lockfile: &Lockfile) -> Result<Self, Self::Error> {
+        lockfile.validate()?;
         toml::to_string_pretty(lockfile).context("failed to serialize binloom.lock")
     }
 }
@@ -88,6 +90,7 @@ impl TryFrom<&Path> for Lockfile {
             bail!("unsupported lockfile version: {}", lockfile.version);
         }
 
+        lockfile.validate()?;
         Ok(lockfile)
     }
 }
@@ -121,6 +124,24 @@ impl Lockfile {
             .persist(path)
             .map_err(|error| error.error)
             .with_context(|| format!("failed to replace {}", path.display()))?;
+
+        Ok(())
+    }
+
+    fn validate(&self) -> Result<()> {
+        if let Some(binloom) = &self.binloom {
+            validate_version(&binloom.version).context("invalid Binloom version in lockfile")?;
+        }
+
+        if let Some(wrapper) = &self.wrapper {
+            validate_version(&wrapper.version).context("invalid wrapper version in lockfile")?;
+        }
+
+        for (name, tool) in &self.tools {
+            validate_tool_name(name)?;
+            validate_version(&tool.version)
+                .with_context(|| format!("invalid version for tool {name} in lockfile"))?;
+        }
 
         Ok(())
     }
@@ -251,5 +272,66 @@ mod tests {
         assert!(content.contains("version = \"0.2.0\""));
         assert!(content.contains("url = \"https://example.com/binloomw\""));
         assert!(content.contains(&format!("sha256 = \"{}\"", "a".repeat(64))));
+    }
+    #[test]
+    fn rejects_unsafe_lockfile_components() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("binloom.lock");
+
+        let invalid_lockfiles = [
+            r#"lock-version = 1
+
+[tools."../../x"]
+version = "1.0.0"
+source = "github:owner/repo"
+tag = "v1.0.0"
+artifacts = {}
+"#,
+            r#"lock-version = 1
+
+[tools.example]
+version = "/tmp/x"
+source = "github:owner/repo"
+tag = "v1.0.0"
+artifacts = {}
+"#,
+            r#"lock-version = 1
+
+[binloom]
+version = "../../x"
+source = "github:KyrboForge/binloom"
+tag = "v0.2.2"
+artifacts = {}
+"#,
+        ];
+
+        for content in invalid_lockfiles {
+            fs::write(&path, content).unwrap();
+            assert!(Lockfile::try_from(path.as_path()).is_err(), "{content}");
+        }
+    }
+
+    #[test]
+    fn refuses_to_serialize_unsafe_components() {
+        let locked_tool = |version: &str| LockedTool {
+            version: version.to_owned(),
+            source: "github:owner/repo".to_owned(),
+            tag: "v1.0.0".to_owned(),
+            artifacts: BTreeMap::new(),
+        };
+
+        let mut lockfile = Lockfile::default();
+        lockfile
+            .tools
+            .insert("example".to_owned(), locked_tool("../../x"));
+
+        assert!(String::try_from(&lockfile).is_err());
+
+        lockfile.tools.clear();
+        lockfile
+            .tools
+            .insert("../../x".to_owned(), locked_tool("1.0.0"));
+
+        assert!(String::try_from(&lockfile).is_err());
     }
 }

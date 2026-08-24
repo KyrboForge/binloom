@@ -1,4 +1,7 @@
-use crate::sources::Source;
+use crate::{
+    common::{validate_tool_name, validate_version},
+    sources::Source,
+};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::{collections::BTreeMap, fs, path::Path};
@@ -45,6 +48,13 @@ impl TryFrom<&Path> for Manifest {
 
         if manifest.version != 1 {
             bail!("unsupported manifest version: {}", manifest.version);
+        }
+        validate_version(&manifest.binloom.version).context("invalid Binloom version")?;
+
+        for (name, tool) in &manifest.tools {
+            validate_tool_name(name)?;
+            validate_version(&tool.version)
+                .with_context(|| format!("invalid version for tool {name}"))?;
         }
         Ok(manifest)
     }
@@ -186,5 +196,41 @@ source = "github:evilmartians/lefthook"
         assert!(content.contains("# project tools"));
         assert!(content.contains("version = \"0.1.1\" # wrapper"));
         assert!(content.contains("version = \"2.1.11\" # hooks"));
+    }
+    #[test]
+    fn rejects_unsafe_names_and_versions() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("binloom.toml");
+
+        let invalid_manifests = [
+            r#"manifest-version = 1
+
+[binloom]
+version = "0.2.2"
+
+[tools."../../x"]
+version = "1.0.0"
+source = "github:owner/repo"
+"#,
+            r#"manifest-version = 1
+
+[binloom]
+version = "0.2.2"
+
+[tools.example]
+version = "/tmp/x"
+source = "github:owner/repo"
+"#,
+            r#"manifest-version = 1
+
+[binloom]
+version = "../../x"
+"#,
+        ];
+
+        for content in invalid_manifests {
+            fs::write(&path, content).unwrap();
+            assert!(Manifest::try_from(path.as_path()).is_err(), "{content}");
+        }
     }
 }
