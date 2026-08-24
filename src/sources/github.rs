@@ -66,8 +66,12 @@ pub fn find_asset<'a>(
         .iter()
         .filter(|asset| {
             let name = asset.name.to_lowercase();
+            let is_metadata = [".sha256", ".sha256sum", ".sig", ".minisig"]
+                .iter()
+                .any(|suffix| name.ends_with(suffix));
 
-            name.contains(&tool_name)
+            !is_metadata
+                && name.contains(&tool_name)
                 && platform
                     .os_aliases()
                     .iter()
@@ -288,5 +292,21 @@ mod tests {
             checksum_from_text(&checksum, "tool.gz", true),
             Some("a".repeat(64))
         );
+    }
+
+    #[test]
+    fn ignores_checksum_assets_when_matching_binary() {
+        let release = Release {
+            tag_name: "v1.0.0".to_owned(),
+            published_at: Some("2026-01-01T00:00:00Z".to_owned()),
+            assets: vec![
+                asset("tool_1.0.0_linux_x86_64.gz"),
+                asset("tool_1.0.0_linux_x86_64.gz.sha256"),
+            ],
+        };
+
+        let matched = find_asset(&release, "tool", Platform::LinuxX86_64).unwrap();
+
+        assert_eq!(matched.name, "tool_1.0.0_linux_x86_64.gz");
     }
 }
