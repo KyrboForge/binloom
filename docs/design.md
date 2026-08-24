@@ -112,21 +112,30 @@ asset = "binloom_macos_aarch64.gz"
 url = "https://github.com/KyrboForge/binloom/releases/download/v0.2.0/binloom_macos_aarch64.gz"
 sha256 = "..."
 format = "gz"
+checksum-source = "digest"
 
 [wrapper]
 version = "0.2.0"
 url = "https://github.com/KyrboForge/binloom/releases/download/v0.2.0/binloomw"
 sha256 = "..."
+checksum-source = "digest"
 ```
 
 Tool entries use the same `artifacts.<platform>` shape under
 `[tools.<name>]`. URLs use HTTPS and checksums are lowercase SHA-256 hex.
 
+`checksum-source` records where the checksum came from:
+
+- `digest` — checksum published in release metadata,
+- `sidecar` — checksum read from an upstream checksum asset,
+- `download` — checksum computed by Binloom from the downloaded bytes,
+- `unknown` — legacy lockfile created before provenance was recorded.
+
 ## Commands and mutation rules
 
 ```text
 binloom init
-binloom add <name> --source <source> --version <version>
+binloom add <name> --source <source> --version <version> [--asset <pattern>]
 binloom install
 binloom update [tool]
 binloom update --self
@@ -179,7 +188,11 @@ the committed lockfile.
 
 - The committed manifest, lockfile, and wrapper are trusted repository state.
 - GitHub metadata and downloaded bytes are untrusted remote input.
-- HTTPS does not replace checksum verification.
+- Published digests and checksum sidecars provide an upstream checksum.
+- When neither exists, Binloom warns, hashes the downloaded bytes, and records
+  `checksum-source = "download"`. This is trust on first use: later installs
+  verify the committed checksum, but the initial lock operation trusts the
+  bytes received over HTTPS.
 - Downloads go to temporary files and are verified before decompression or
   execution.
 - Completed executables are moved atomically into their versioned location.

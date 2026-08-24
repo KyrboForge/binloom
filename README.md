@@ -80,7 +80,8 @@ flowchart LR
 ```
 
 The manifest describes intent. The committed lockfile records exact versions,
-URLs, formats, and checksums. Downloads are verified before installation.
+URLs, formats, checksums, and checksum provenance. Downloads are verified
+before installation.
 
 ## 🚀 Quick start
 
@@ -156,7 +157,7 @@ minimum-release-age-minutes = 1440
 | Command | Purpose |
 | --- | --- |
 | `binloom init` | Create missing manifest and wrapper files; add `.tools/` to `.gitignore` |
-| `binloom add <name> --source <source> --version <version>` | Append a tool, refresh the lockfile, and install it |
+| `binloom add <name> --source <source> --version <version> [--asset <pattern>]` | Append a tool, refresh the lockfile, and install it |
 | `binloom install` | Install every locked tool; resolve latest allowed releases when the lockfile is missing |
 | `binloom update [tool]` | Update one tool, or all tools and Binloom when omitted |
 | `binloom update --self` | Update only Binloom and its wrapper metadata |
@@ -173,7 +174,7 @@ and CI receive the same toolchain.
 | --- | --- | --- |
 | `binloomw` | Generated POSIX bootstrap wrapper | yes |
 | `binloom.toml` | Human-written requirements | yes |
-| `binloom.lock` | Resolved artifacts and checksums | yes |
+| `binloom.lock` | Resolved artifacts, checksums, and provenance | yes |
 | `.tools/` | Downloaded binaries and links | no |
 
 When `[wrapper]` metadata is present in the lockfile, `binloomw` also verifies

@@ -43,6 +43,17 @@ pub struct LockedTool {
     pub artifacts: BTreeMap<String, LockedArtifact>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ChecksumSource {
+    Digest,
+    Sidecar,
+    Download,
+
+    #[default]
+    Unknown,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LockedArtifact {
@@ -50,6 +61,8 @@ pub struct LockedArtifact {
     pub url: String,
     pub sha256: String,
     pub format: ArtifactFormat,
+    #[serde(default, rename = "checksum-source")]
+    pub checksum_source: ChecksumSource,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -65,6 +78,8 @@ pub struct LockedWrapper {
     pub version: String,
     pub url: String,
     pub sha256: String,
+    #[serde(default, rename = "checksum-source")]
+    pub checksum_source: ChecksumSource,
 }
 
 impl TryFrom<&Lockfile> for String {
@@ -182,6 +197,7 @@ mod tests {
                 url: "https://example.com/lefthook.gz".to_owned(),
                 sha256: "a".repeat(64),
                 format: ArtifactFormat::Gz,
+                checksum_source: ChecksumSource::Digest,
             },
         );
         let mut lockfile = Lockfile::default();
@@ -203,6 +219,7 @@ mod tests {
         assert!(first.contains("[tools.lefthook]"));
         assert!(first.contains("[tools.lefthook.artifacts.linux-x86_64]"));
         assert!(first.contains("format = \"gz\""));
+        assert!(first.contains("checksum-source = \"digest\""));
 
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("binloom.lock");
@@ -210,12 +227,22 @@ mod tests {
         lockfile.write(&path).unwrap();
 
         let loaded = Lockfile::try_from(path.as_path()).unwrap();
+        let legacy_content = first.replace("checksum-source = \"digest\"\n", "");
+        let legacy: Lockfile = toml::from_str(&legacy_content).unwrap();
 
+        assert_eq!(
+            legacy.tools["lefthook"].artifacts["linux-x86_64"].checksum_source,
+            ChecksumSource::Unknown
+        );
         assert_eq!(loaded.version, 1);
         assert_eq!(loaded.tools["lefthook"].version, "2.1.10");
         assert_eq!(
             loaded.tools["lefthook"].artifacts["linux-x86_64"].sha256,
             "a".repeat(64)
+        );
+        assert_eq!(
+            loaded.tools["lefthook"].artifacts["linux-x86_64"].checksum_source,
+            ChecksumSource::Digest
         );
     }
 
@@ -230,6 +257,7 @@ mod tests {
                 url: "https://example.com/binloom.gz".to_owned(),
                 sha256: "b".repeat(64),
                 format: ArtifactFormat::Gz,
+                checksum_source: ChecksumSource::Digest,
             },
         );
 
@@ -262,6 +290,7 @@ mod tests {
                 version: "0.2.0".to_owned(),
                 url: "https://example.com/binloomw".to_owned(),
                 sha256: "a".repeat(64),
+                checksum_source: ChecksumSource::Digest,
             }),
             ..Lockfile::default()
         };

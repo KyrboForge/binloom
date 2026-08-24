@@ -1,18 +1,18 @@
-use std::collections::BTreeMap;
-use std::path::Path;
+use std::{collections::BTreeMap, path::Path};
 
-use crate::lockfile::{ArtifactFormat, LockedArtifact, LockedTool, LockedWrapper, Lockfile};
 use crate::{
-    common::validate_version,
+    common::{validate_version, warn},
     download,
+    lockfile::{
+        ArtifactFormat, ChecksumSource, LockedArtifact, LockedTool, LockedWrapper, Lockfile,
+    },
     manifest::{self, Manifest, Tool},
     platform::Platform,
     sources::{Source, release},
 };
 use anyhow::{Context, Result, bail};
 use reqwest::blocking::Client;
-use time::format_description::well_known::Rfc3339;
-use time::{Duration, OffsetDateTime};
+use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 
 pub fn update(tool_name: Option<&str>) -> Result<()> {
     update_tools(tool_name, true)
@@ -153,11 +153,24 @@ fn resolve_checksum(
     client: &Client,
     release: &release::Release,
     asset: &release::ReleaseAsset,
-) -> Result<String> {
-    match release.checksum_from_release(client, asset)? {
-        Some(checksum) => Ok(checksum),
-        None => download::sha256_url(client, &asset.download_url),
+) -> Result<(String, ChecksumSource)> {
+    if let Some(checksum) = &asset.sha256 {
+        return Ok((checksum.clone(), ChecksumSource::Digest));
     }
+
+    if let Some(checksum) = release.checksum_from_sidecar(client, asset)? {
+        return Ok((checksum, ChecksumSource::Sidecar));
+    }
+
+    warn(&format!(
+        "{} has no published checksum; hashing downloaded bytes (TOFU)",
+        asset.name
+    ));
+
+    Ok((
+        download::sha256_url(client, &asset.download_url)?,
+        ChecksumSource::Download,
+    ))
 }
 
 fn version_from_tag(tag: &str) -> Result<String> {
@@ -186,14 +199,15 @@ fn resolve_release(
             Some(pattern) => release.find_asset_by_pattern(pattern, &version, platform)?,
             None => release.find_asset(name, platform)?,
         };
-        let checksum = resolve_checksum(client, release, asset)?;
+        let (sha256, checksum_source) = resolve_checksum(client, release, asset)?;
         artifacts.insert(
             platform.to_string(),
             LockedArtifact {
                 asset: asset.name.clone(),
                 url: asset.download_url.clone(),
-                sha256: checksum,
+                sha256,
                 format: ArtifactFormat::try_from(asset.name.as_str())?,
+                checksum_source,
             },
         );
     }
@@ -332,12 +346,13 @@ fn resolve_binloom_release(
         client,
     )?;
     let asset = release.find_asset_by_name("binloomw")?;
-    let sha256 = resolve_checksum(client, release, asset)?;
+    let (sha256, checksum_source) = resolve_checksum(client, release, asset)?;
 
     let wrapper = LockedWrapper {
         version: binloom.version.clone(),
         url: asset.download_url.clone(),
         sha256,
+        checksum_source,
     };
 
     Ok((binloom, wrapper))
@@ -374,6 +389,7 @@ mod tests {
                 version: "0.1.1".to_owned(),
                 url: "https://example.com/binloomw".to_owned(),
                 sha256: "a".repeat(64),
+                checksum_source: ChecksumSource::Digest,
             }),
             binloom: Some(LockedTool {
                 version: "0.1.0".to_owned(),
@@ -399,5 +415,24 @@ mod tests {
         for tag in ["v/tmp/x", "v../../x", r"v..\..\x", "v.hidden"] {
             assert!(version_from_tag(tag).is_err(), "{tag:?}");
         }
+    }
+
+    #[test]
+    fn records_embedded_digest_provenance() {
+        let checksum = "a".repeat(64);
+        let release = release::Release {
+            tag: "v1.0.0".to_owned(),
+            published_at: None,
+            assets: vec![release::ReleaseAsset {
+                name: "tool.gz".to_owned(),
+                download_url: "https://example.com/tool.gz".to_owned(),
+                sha256: Some(checksum.clone()),
+            }],
+        };
+        let client = Client::builder().build().unwrap();
+
+        let resolved = resolve_checksum(&client, &release, &release.assets[0]).unwrap();
+
+        assert_eq!(resolved, (checksum, ChecksumSource::Digest));
     }
 }

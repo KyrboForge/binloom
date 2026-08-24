@@ -132,15 +132,11 @@ impl Release {
         }
     }
 
-    pub fn checksum_from_release(
+    pub fn checksum_from_sidecar(
         &self,
         client: &Client,
         asset: &ReleaseAsset,
     ) -> anyhow::Result<Option<String>> {
-        if let Some(checksum) = &asset.sha256 {
-            return Ok(Some(checksum.clone()));
-        }
-
         let exact_names = [
             format!("{}.sha256", asset.name),
             format!("{}.sha256sum", asset.name),
@@ -327,26 +323,6 @@ mod tests {
     }
 
     #[test]
-    fn prefers_checksum_embedded_in_asset() {
-        let checksum = "a".repeat(64);
-        let mut release_asset = asset("tool_linux_x86_64.gz");
-        release_asset.sha256 = Some(checksum.clone());
-        let release = Release {
-            tag: "v1.0.0".to_owned(),
-            published_at: None,
-            assets: vec![release_asset],
-        };
-        let client = Client::builder().build().unwrap();
-
-        assert_eq!(
-            release
-                .checksum_from_release(&client, &release.assets[0])
-                .unwrap(),
-            Some(checksum)
-        );
-    }
-
-    #[test]
     fn returns_none_when_release_has_no_checksum() {
         let release = Release {
             tag: "v1.0.0".to_owned(),
@@ -357,7 +333,7 @@ mod tests {
 
         assert_eq!(
             release
-                .checksum_from_release(&client, &release.assets[0])
+                .checksum_from_sidecar(&client, &release.assets[0])
                 .unwrap(),
             None
         );
