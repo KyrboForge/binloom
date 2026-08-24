@@ -269,6 +269,19 @@ pub fn checksum_from_release(
     Ok(None)
 }
 
+pub fn find_asset_by_name<'a>(release: &'a Release, asset_name: &str) -> Result<&'a ReleaseAsset> {
+    release
+        .assets
+        .iter()
+        .find(|asset| asset.name == asset_name)
+        .with_context(|| {
+            format!(
+                "release {} has no asset named {asset_name}",
+                release.tag_name
+            )
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,5 +405,23 @@ mod tests {
         let matched = find_asset(&release, "tool", Platform::MacosAarch64).unwrap();
 
         assert_eq!(matched.name, "tool_1.0.0_MacOS_arm64.gz");
+    }
+
+    #[test]
+    fn finds_exact_asset_by_name() {
+        let release = Release {
+            tag_name: "v0.2.0".to_owned(),
+            published_at: Some("2026-01-01T00:00:00Z".to_owned()),
+            assets: vec![asset("binloom_macos_aarch64.gz"), asset("binloomw")],
+        };
+
+        let wrapper = find_asset_by_name(&release, "binloomw").unwrap();
+        assert_eq!(wrapper.name, "binloomw");
+
+        let error = find_asset_by_name(&release, "missing").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "release v0.2.0 has no asset named missing"
+        );
     }
 }

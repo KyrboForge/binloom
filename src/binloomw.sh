@@ -4,7 +4,7 @@ set -eu
 
 BINLOOMW_VERSION="@BINLOOM_VERSION@"
 
-ROOT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)
+ROOT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
 LOCKFILE="$ROOT_DIR/binloom.lock"
 
 if [ ! -f "$LOCKFILE" ]; then
@@ -59,6 +59,78 @@ read_lock_value() {
     ' "$LOCKFILE"
 }
 
+download_file() {
+    if command -v curl >/dev/null 2>&1; then
+        curl --fail --location --silent --show-error \
+            --output "$2" \
+            "$1"
+    elif command -v wget >/dev/null 2>&1; then
+        wget --quiet --output-document="$2" "$1"
+    else
+        echo "error: curl or wget is required to download files" >&2
+        return 1
+    fi
+}
+
+sha256_file() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        echo "error: sha256sum or shasum is required to verify files" >&2
+        return 1
+    fi
+}
+
+verify_file() {
+    actual_sha256=$(sha256_file "$1")
+
+    if [ "$actual_sha256" != "$2" ]; then
+        echo "error: $3 checksum mismatch" >&2
+        echo "expected: $2" >&2
+        echo "actual:   $actual_sha256" >&2
+        return 1
+    fi
+}
+
+LOCKED_WRAPPER_VERSION=$(read_lock_value "wrapper" "version")
+WRAPPER_URL=$(read_lock_value "wrapper" "url")
+WRAPPER_SHA256=$(read_lock_value "wrapper" "sha256")
+WRAPPER_PATH="$ROOT_DIR/binloomw"
+
+if [ -n "${LOCKED_WRAPPER_VERSION}${WRAPPER_URL}${WRAPPER_SHA256}" ]; then
+    if [ -z "$LOCKED_WRAPPER_VERSION" ] ||
+        [ -z "$WRAPPER_URL" ] ||
+        [ -z "$WRAPPER_SHA256" ]; then
+        echo "error: incomplete wrapper lock data" >&2
+        exit 1
+    fi
+
+    CURRENT_WRAPPER_SHA256=$(sha256_file "$WRAPPER_PATH")
+
+    if [ "$BINLOOMW_VERSION" != "$LOCKED_WRAPPER_VERSION" ] ||
+        [ "$CURRENT_WRAPPER_SHA256" != "$WRAPPER_SHA256" ]; then
+        WRAPPER_TMP=$(mktemp "$ROOT_DIR/.binloomw.XXXXXX")
+
+        cleanup_wrapper() {
+            rm -f "$WRAPPER_TMP"
+        }
+
+        trap cleanup_wrapper EXIT HUP INT TERM
+
+        download_file "$WRAPPER_URL" "$WRAPPER_TMP"
+        verify_file "$WRAPPER_TMP" "$WRAPPER_SHA256" "Binloom wrapper"
+
+        chmod 755 "$WRAPPER_TMP"
+        mv "$WRAPPER_TMP" "$WRAPPER_PATH"
+
+        trap - EXIT HUP INT TERM
+
+        exec "$WRAPPER_PATH" "$@"
+    fi
+fi
+
 VERSION=$(read_lock_value "binloom" "version")
 ARTIFACT_SECTION="binloom.artifacts.$PLATFORM"
 URL=$(read_lock_value "$ARTIFACT_SECTION" "url")
@@ -88,32 +160,10 @@ cleanup() {
 
 trap cleanup EXIT HUP INT TERM
 
-if command -v curl >/dev/null 2>&1; then
-    curl --fail --location --silent --show-error \
-        --output "$ARCHIVE" \
-        "$URL"
-elif command -v wget >/dev/null 2>&1; then
-    wget --quiet --output-document="$ARCHIVE" "$URL"
-else
-    echo "error: curl or wget is required to download Binloom" >&2
-    exit 1
-fi
+download_file "$URL" "$ARCHIVE"
 
-if command -v sha256sum >/dev/null 2>&1; then
-    ACTUAL_SHA256=$(sha256sum "$ARCHIVE" | awk '{print $1}')
-elif command -v shasum >/dev/null 2>&1; then
-    ACTUAL_SHA256=$(shasum -a 256 "$ARCHIVE" | awk '{print $1}')
-else
-    echo "error: sha256sum or shasum is required to verify Binloom" >&2
-    exit 1
-fi
+verify_file "$ARCHIVE" "$SHA256" "Binloom"
 
-if [ "$ACTUAL_SHA256" != "$SHA256" ]; then
-    echo "error: Binloom checksum mismatch" >&2
-    echo "expected: $SHA256" >&2
-    echo "actual:   $ACTUAL_SHA256" >&2
-    exit 1
-fi
 case "$FORMAT" in
     gz)
         gzip -dc "$ARCHIVE" > "$BINARY_TMP"

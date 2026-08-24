@@ -237,4 +237,52 @@ format = "raw"
                 .is_file()
         );
     }
+
+    #[test]
+    fn wrapper_updates_itself_from_lockfile() {
+        let directory = tempfile::tempdir().unwrap();
+        let wrapper = directory.path().join("binloomw");
+        let updated_wrapper = directory.path().join("updated-binloomw");
+
+        generate_binloomw(&wrapper).unwrap();
+
+        let updated_content = br#"#!/bin/sh
+printf 'updated wrapper: %s\n' "$*"
+"#;
+
+        fs::write(&updated_wrapper, updated_content).unwrap();
+
+        let checksum = Sha256::digest(updated_content)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+
+        fs::write(
+            directory.path().join("binloom.lock"),
+            format!(
+                r#"lock-version = 1
+
+[wrapper]
+version = "next"
+url = "file://{}"
+sha256 = "{checksum}"
+"#,
+                updated_wrapper.display()
+            ),
+        )
+        .unwrap();
+
+        let output = Command::new(&wrapper)
+            .args(["hello", "world"])
+            .output()
+            .unwrap();
+
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            "updated wrapper: hello world\n"
+        );
+
+        assert_eq!(fs::read(wrapper).unwrap(), updated_content);
+    }
 }

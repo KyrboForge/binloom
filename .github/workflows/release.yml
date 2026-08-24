@@ -108,9 +108,26 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Generate wrapper
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          sed "s/@BINLOOM_VERSION@/${RELEASE_VERSION}/g" \
+            src/binloomw.sh > dist/binloomw
+
+          chmod 755 dist/binloomw
+
+          grep -q "BINLOOMW_VERSION=\"${RELEASE_VERSION}\"" dist/binloomw
+          if grep -q "@BINLOOM_VERSION@" dist/binloomw; then
+            echo "wrapper still contains version placeholder" >&2
+            exit 1
+          fi
+
+          sh -n dist/binloomw
+
       - name: Generate checksums
         working-directory: dist
-        run: sha256sum *.gz > SHA256SUMS
+        run: sha256sum *.gz binloomw > SHA256SUMS
 
       - uses: softprops/action-gh-release@v2
         with:
@@ -121,4 +138,5 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             dist/*.gz
+            dist/binloomw
             dist/SHA256SUMS
