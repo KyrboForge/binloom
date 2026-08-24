@@ -1,10 +1,19 @@
-# 🧶 Binloom
+<p align="center">
+  <img src="docs/assets/binloom-logo.png" alt="Binloom logo" width="160">
+</p>
 
-[![CI](https://github.com/KyrboForge/binloom/actions/workflows/ci.yml/badge.svg)](https://github.com/KyrboForge/binloom/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/KyrboForge/binloom)](https://github.com/KyrboForge/binloom/releases/latest)
-[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
+<h1 align="center">🧶 Binloom</h1>
 
-> Pinned, checksum-verified developer tools that live with your repository.
+<p align="center">
+  <strong>Pinned, checksum-verified developer tools that live with your repository.</strong>
+</p>
+
+<p align="center">
+  <a href="https://github.com/KyrboForge/binloom/actions/workflows/ci.yml"><img src="https://github.com/KyrboForge/binloom/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/KyrboForge/binloom/releases/latest"><img src="https://img.shields.io/github/v/release/KyrboForge/binloom" alt="Release"></a>
+  <a href="https://crates.io/crates/binloom"><img src="https://img.shields.io/crates/v/binloom.svg" alt="crates.io"></a>
+  <a href="LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg" alt="License"></a>
+</p>
 
 Binloom is a small, repository-local manager for downloadable developer tools.
 It gives every contributor and CI job the same pinned executables without a
@@ -14,6 +23,43 @@ It works the same way in Rust, Go, Python, JavaScript, Java, and mixed
 repositories.
 
 **No global installs. No language lock-in. No version drift.**
+
+## 📦 Installation
+
+### Bootstrap without a global install
+
+The recommended bootstrap downloads a temporary, checksum-verified Binloom
+binary and runs the requested command without installing anything globally:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/KyrboForge/binloom/main/bootstrap.sh \
+  -o /tmp/binloom-bootstrap
+sh /tmp/binloom-bootstrap init
+rm /tmp/binloom-bootstrap
+```
+
+### Optional global install
+
+If you want `binloom` available everywhere, choose one of these:
+
+#### crates.io
+
+```sh
+cargo install binloom
+```
+
+#### Git repository
+
+```sh
+cargo install --git https://github.com/KyrboForge/binloom
+```
+
+🚧 Homebrew support through `KyrboForge/tap` is in progress.
+
+Global Binloom is convenient for commands such as `binloom init`. The
+committed `binloomw` still uses the version pinned by the repository so every
+contributor and CI job runs the same binary. Contributors therefore only need
+`./binloomw`, not a global installation.
 
 ## ✨ Why Binloom?
 
@@ -154,7 +200,8 @@ cargo install cargo-llvm-cov
 rustup run stable cargo llvm-cov --all-targets --locked --summary-only
 ```
 
-CI rejects changes that lower line coverage below 60%.
+CI rejects changes that lower line coverage below 60% and uploads the report
+to GitHub Code Quality.
 
 ## 📜 License
 

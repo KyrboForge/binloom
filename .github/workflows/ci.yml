@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: read
+  code-quality: write
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -34,7 +35,9 @@ jobs:
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: Validate wrapper and schemas
         run: |
+          sh -n bootstrap.sh
           sh -n src/binloomw.sh
+          shellcheck bootstrap.sh
           shellcheck src/binloomw.sh
           jq empty schemas/binloom.schema.json
 
@@ -60,8 +63,18 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
       - uses: taiki-e/install-action@cargo-llvm-cov
-      - run: cargo llvm-cov --all-targets --locked --summary-only --fail-under-lines 60
+      - name: Generate coverage report
+        run: cargo llvm-cov --all-targets --locked --cobertura --output-path coverage.xml --fail-under-lines 60
+      - name: Upload coverage report
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/upload-code-coverage@v1
+        with:
+          file: coverage.xml
+          language: Rust
+          label: code-coverage/cargo-llvm-cov
