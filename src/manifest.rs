@@ -17,6 +17,9 @@ pub struct Manifest {
 
     #[serde(default)]
     pub tools: BTreeMap<String, Tool>,
+
+    #[serde(default)]
+    pub update: UpdateConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -89,6 +92,19 @@ impl Display for GithubSource {
         write!(formatter, "github:{}/{}", self.owner, self.repository)
     }
 }
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct UpdateConfig {
+    pub minimum_release_age_minutes: u64,
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self {
+            minimum_release_age_minutes: 24 * 60,
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -119,6 +135,7 @@ asset = "lefthook_{version}_{os}_{arch}.gz"
 
         assert_eq!(manifest.version, 1);
         assert_eq!(manifest.binloom.version, "0.1.0");
+        assert_eq!(manifest.update.minimum_release_age_minutes, 24 * 60);
 
         let lefthook = &manifest.tools["lefthook"];
 
