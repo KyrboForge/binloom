@@ -144,6 +144,18 @@ It is not a language package manager, runtime manager, daemon, GUI, or remote
 package registry. See the [MVP design](docs/design.md) for the detailed
 contract.
 
+## 🧪 Development
+
+Run the test suite and measure line coverage locally with:
+
+```sh
+rustup component add llvm-tools-preview
+cargo install cargo-llvm-cov
+rustup run stable cargo llvm-cov --all-targets --locked --summary-only
+```
+
+CI rejects changes that lower line coverage below 60%.
+
 ## 📜 License
 
 Licensed under either [MIT](LICENSE-MIT) or

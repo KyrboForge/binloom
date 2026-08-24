@@ -6,11 +6,7 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 
-use crate::{
-    install,
-    manifest::{GithubSource, Manifest},
-    update,
-};
+use crate::{install, manifest::Manifest, sources::Source, update};
 
 pub fn add(name: &str, source: &str, version: &str) -> Result<()> {
     write_tool(Path::new("binloom.toml"), name, source, version)?;
@@ -42,7 +38,7 @@ fn write_tool(path: &Path, name: &str, source: &str, version: &str) -> Result<()
         "tool {name} is already configured"
     );
 
-    let source = GithubSource::try_from(source.to_owned()).map_err(anyhow::Error::msg)?;
+    let source = Source::try_from(source.to_owned()).map_err(anyhow::Error::msg)?;
 
     let content = fs::read_to_string(path)?;
     let mut file = OpenOptions::new().append(true).open(path)?;

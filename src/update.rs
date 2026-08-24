@@ -2,8 +2,12 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::lockfile::{ArtifactFormat, LockedArtifact, LockedTool, LockedWrapper, Lockfile};
-use crate::manifest::{GithubSource, Tool};
-use crate::{download, manifest, manifest::Manifest, platform::Platform, sources::github};
+use crate::{
+    download,
+    manifest::{self, Manifest, Tool},
+    platform::Platform,
+    sources::{Source, release},
+};
 use anyhow::{Context, Result, bail};
 use reqwest::blocking::Client;
 use time::format_description::well_known::Rfc3339;
@@ -106,55 +110,55 @@ fn update_tools(tool_name: Option<&str>, latest: bool) -> Result<()> {
 
 fn resolve_latest_tool(
     name: &str,
-    source: &GithubSource,
+    source: &Source,
     minimum_age_minutes: u64,
     client: &Client,
 ) -> Result<LockedTool> {
-    let release = github::fetch_latest_release(client, source)?;
+    let release = source.provider().fetch_latest_release(client)?;
     resolve_release(name, source, &release, minimum_age_minutes, client)
 }
 
 fn resolve_tool(
     name: &str,
     version: &str,
-    source: &GithubSource,
+    source: &Source,
     minimum_age_minutes: u64,
     client: &Client,
 ) -> Result<LockedTool> {
-    let release = github::fetch_release(client, source, version)?;
+    let release = source.provider().fetch_release(client, version)?;
     resolve_release(name, source, &release, minimum_age_minutes, client)
 }
 
 fn resolve_checksum(
     client: &Client,
-    release: &github::Release,
-    asset: &github::ReleaseAsset,
+    release: &release::Release,
+    asset: &release::ReleaseAsset,
 ) -> Result<String> {
-    match github::checksum_from_release(client, release, asset)? {
+    match release.checksum_from_release(client, asset)? {
         Some(checksum) => Ok(checksum),
-        None => download::sha256_url(client, &asset.browser_download_url),
+        None => download::sha256_url(client, &asset.download_url),
     }
 }
 
 fn resolve_release(
     name: &str,
-    source: &GithubSource,
-    release: &github::Release,
+    source: &Source,
+    release: &release::Release,
     minimum_age_minutes: u64,
     client: &Client,
 ) -> Result<LockedTool> {
-    println!("Found {} for {name}:", release.tag_name);
+    println!("Found {} for {name}:", release.tag);
     ensure_minimum_release_age(release, minimum_age_minutes, OffsetDateTime::now_utc())?;
 
     let mut artifacts = BTreeMap::new();
     for platform in Platform::ALL {
-        let asset = github::find_asset(release, name, platform)?;
+        let asset = release.find_asset(name, platform)?;
         let checksum = resolve_checksum(client, release, asset)?;
         artifacts.insert(
             platform.to_string(),
             LockedArtifact {
                 asset: asset.name.clone(),
-                url: asset.browser_download_url.clone(),
+                url: asset.download_url.clone(),
                 sha256: checksum,
                 format: ArtifactFormat::try_from(asset.name.as_str())?,
             },
@@ -163,49 +167,49 @@ fn resolve_release(
 
     Ok(LockedTool {
         version: release
-            .tag_name
+            .tag
             .strip_prefix('v')
-            .unwrap_or(&release.tag_name)
+            .unwrap_or(&release.tag)
             .to_owned(),
         source: source.to_string(),
-        tag: release.tag_name.clone(),
+        tag: release.tag.clone(),
         artifacts,
     })
 }
 
 fn resolve_latest_binloom(
-    source: &GithubSource,
+    source: &Source,
     minimum_age_minutes: u64,
     client: &Client,
 ) -> Result<(LockedTool, LockedWrapper)> {
-    let release = github::fetch_latest_release(client, source)?;
+    let release = source.provider().fetch_latest_release(client)?;
 
     resolve_binloom_release(source, &release, minimum_age_minutes, client)
 }
 
 fn resolve_binloom_version(
-    source: &GithubSource,
+    source: &Source,
     version: &str,
     minimum_age_minutes: u64,
     client: &Client,
 ) -> Result<(LockedTool, LockedWrapper)> {
-    let release = github::fetch_release(client, source, version)?;
+    let release = source.provider().fetch_release(client, version)?;
 
     resolve_binloom_release(source, &release, minimum_age_minutes, client)
 }
 
 fn ensure_minimum_release_age(
-    release: &github::Release,
+    release: &release::Release,
     minimum_minutes: u64,
     now: OffsetDateTime,
 ) -> Result<()> {
     let published_at = release
         .published_at
         .as_deref()
-        .with_context(|| format!("release {} has no publication date", release.tag_name))?;
+        .with_context(|| format!("release {} has no publication date", release.tag))?;
 
     let published_at = OffsetDateTime::parse(published_at, &Rfc3339)
-        .with_context(|| format!("release {} has invalid publication date", release.tag_name))?;
+        .with_context(|| format!("release {} has invalid publication date", release.tag))?;
 
     let minimum_seconds = minimum_minutes
         .checked_mul(60)
@@ -221,7 +225,7 @@ fn ensure_minimum_release_age(
 
         bail!(
             "release {} is too new; wait {remaining_minutes} more minute(s)",
-            release.tag_name
+            release.tag
         );
     }
 
@@ -278,27 +282,25 @@ pub fn update_binloom() -> Result<()> {
     Ok(())
 }
 
-fn binloom_source() -> GithubSource {
-    GithubSource {
-        owner: "KyrboForge".to_owned(),
-        repository: "binloom".to_owned(),
-    }
+fn binloom_source() -> Source {
+    Source::try_from("github:KyrboForge/binloom".to_owned())
+        .expect("hardcoded Binloom source must be valid")
 }
 
 fn resolve_binloom_release(
-    source: &GithubSource,
-    release: &github::Release,
+    source: &Source,
+    release: &release::Release,
     minimum_age_minutes: u64,
     client: &Client,
 ) -> Result<(LockedTool, LockedWrapper)> {
     let binloom = resolve_release("binloom", source, release, minimum_age_minutes, client)?;
 
-    let asset = github::find_asset_by_name(release, "binloomw")?;
+    let asset = release.find_asset_by_name("binloomw")?;
     let sha256 = resolve_checksum(client, release, asset)?;
 
     let wrapper = LockedWrapper {
         version: binloom.version.clone(),
-        url: asset.browser_download_url.clone(),
+        url: asset.download_url.clone(),
         sha256,
     };
 
@@ -311,8 +313,8 @@ mod tests {
 
     #[test]
     fn enforces_minimum_release_age() {
-        let release = github::Release {
-            tag_name: "v1.0.0".to_owned(),
+        let release = release::Release {
+            tag: "v1.0.0".to_owned(),
             published_at: Some("2026-01-01T12:00:00Z".to_owned()),
             assets: vec![],
         };

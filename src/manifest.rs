@@ -1,11 +1,7 @@
+use crate::sources::Source;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
-use std::{
-    collections::BTreeMap,
-    fmt::{self, Display, Formatter},
-    fs,
-    path::Path,
-};
+use std::{collections::BTreeMap, fs, path::Path};
 use toml_edit::{DocumentMut, Item, Value};
 
 #[derive(Debug, Deserialize)]
@@ -33,7 +29,7 @@ pub struct Binloom {
 #[serde(deny_unknown_fields)]
 pub struct Tool {
     pub version: String,
-    pub source: GithubSource,
+    pub source: Source,
     pub asset: Option<String>,
 }
 
@@ -51,46 +47,6 @@ impl TryFrom<&Path> for Manifest {
             bail!("unsupported manifest version: {}", manifest.version);
         }
         Ok(manifest)
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(try_from = "String")]
-pub struct GithubSource {
-    pub owner: String,
-    pub repository: String,
-}
-
-impl TryFrom<String> for GithubSource {
-    type Error = String;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        let source = value
-            .strip_prefix("github:")
-            .ok_or_else(|| "source must use github:owner/repository".to_owned())?;
-
-        let (owner, repository) = source
-            .split_once('/')
-            .ok_or_else(|| "source must use github:owner/repository".to_owned())?;
-
-        if owner.is_empty()
-            || repository.is_empty()
-            || repository.contains('/')
-            || value.chars().any(char::is_whitespace)
-        {
-            return Err("source must use github:owner/repository".to_owned());
-        }
-
-        Ok(Self {
-            owner: owner.to_owned(),
-            repository: repository.to_owned(),
-        })
-    }
-}
-
-impl Display for GithubSource {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        write!(formatter, "github:{}/{}", self.owner, self.repository)
     }
 }
 
@@ -202,16 +158,6 @@ version = "0.1.0"
         let error = Manifest::try_from(path.as_path()).unwrap_err();
 
         assert_eq!(error.to_string(), "unsupported manifest version: 2");
-    }
-
-    #[test]
-    fn rejects_invalid_source() {
-        let source = GithubSource::try_from("https://github.com/owner/repo".to_owned());
-
-        assert_eq!(
-            source.unwrap_err(),
-            "source must use github:owner/repository"
-        );
     }
 
     #[test]
