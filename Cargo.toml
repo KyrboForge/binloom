@@ -1,6 +1,6 @@
 [package]
 name = "binloom"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 authors = ["Kacper 'Obryko' Obrycki <kacperobrycki@gmail.com>"]
 description = "Repository-local manager for pinned developer tools"
@@ -9,6 +9,13 @@ repository = "https://github.com/KyrboForge/binloom"
 readme = "README.md"
 keywords = ["toolchain", "developer-tools", "reproducible", "cli"]
 categories = ["command-line-utilities", "development-tools"]
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+panic = "abort"
+opt-level = "z"
 
 [dependencies]
 anyhow = "1.0.104"
