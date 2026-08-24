@@ -2,6 +2,9 @@ mod add;
 mod common;
 mod download;
 mod exec;
+#[cfg(test)]
+#[path = "../tests/supports/http.rs"]
+mod http_fixture;
 mod init;
 mod install;
 mod list;

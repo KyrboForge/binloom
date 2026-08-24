@@ -8,6 +8,8 @@ use serde::Deserialize;
 use std::fmt;
 use std::fmt::{Display, Formatter};
 
+const GITHUB_API_URL: &str = "https://api.github.com";
+
 #[derive(Debug, Deserialize)]
 pub struct GithubRelease {
     pub tag_name: String,
@@ -93,47 +95,11 @@ impl Display for GithubSource {
 
 impl ReleaseProvider for GithubSource {
     fn fetch_release(&self, client: &Client, version: &str) -> Result<Release> {
-        let tags = if version.starts_with('v') {
-            vec![version.to_owned()]
-        } else {
-            vec![format!("v{version}"), version.to_owned()]
-        };
+        let token = std::env::var("GITHUB_TOKEN")
+            .or_else(|_| std::env::var("GH_TOKEN"))
+            .ok();
 
-        for tag in tags {
-            let url = format!(
-                "https://api.github.com/repos/{}/{}/releases/tags/{tag}",
-                self.owner, self.repository
-            );
-            let mut request = client.get(&url);
-
-            if let Ok(token) = std::env::var("GITHUB_TOKEN").or_else(|_| std::env::var("GH_TOKEN"))
-            {
-                request = request.bearer_auth(token);
-            }
-
-            let response = request
-                .send()
-                .with_context(|| format!("failed to fetch GitHub release {tag}"))?;
-
-            if response.status() == StatusCode::NOT_FOUND {
-                continue;
-            }
-
-            let release = response
-                .error_for_status()
-                .with_context(|| format!("GitHub rejected release request for {tag}"))?
-                .json::<GithubRelease>()
-                .with_context(|| format!("failed to parse GitHub release {tag}"))?;
-
-            return release.try_into();
-        }
-
-        bail!(
-            "release {} not found for {}/{}",
-            version,
-            self.owner,
-            self.repository
-        )
+        self.fetch_release_from(client, version, GITHUB_API_URL, token.as_deref())
     }
 
     fn fetch_latest_release(&self, client: &Client) -> Result<Release> {
@@ -180,9 +146,62 @@ impl GithubReleaseAsset {
         Ok(Some(checksum.to_ascii_lowercase()))
     }
 }
+
+impl GithubSource {
+    fn fetch_release_from(
+        &self,
+        client: &Client,
+        version: &str,
+        api_url: &str,
+        token: Option<&str>,
+    ) -> Result<Release> {
+        let tags = if version.starts_with('v') {
+            vec![version.to_owned()]
+        } else {
+            vec![format!("v{version}"), version.to_owned()]
+        };
+
+        for tag in tags {
+            let url = format!(
+                "{api_url}/repos/{}/{}/releases/tags/{tag}",
+                self.owner, self.repository
+            );
+            let mut request = client.get(&url);
+
+            if let Some(token) = token {
+                request = request.bearer_auth(token);
+            }
+
+            let response = request
+                .send()
+                .with_context(|| format!("failed to fetch GitHub release {tag}"))?;
+
+            if response.status() == StatusCode::NOT_FOUND {
+                continue;
+            }
+
+            let release = response
+                .error_for_status()
+                .with_context(|| format!("GitHub rejected release request for {tag}"))?
+                .json::<GithubRelease>()
+                .with_context(|| format!("failed to parse GitHub release {tag}"))?;
+
+            return release.try_into();
+        }
+
+        bail!(
+            "release {} not found for {}/{}",
+            version,
+            self.owner,
+            self.repository
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::http_fixture::{Response, Server};
 
     fn asset(name: &str) -> GithubReleaseAsset {
         GithubReleaseAsset {
@@ -238,6 +257,49 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "unsupported digest for tool_linux_x86_64.gz"
+        );
+    }
+    #[test]
+    fn retries_tag_without_v_and_attaches_token() {
+        let server = Server::start(vec![
+            Response {
+                status: 404,
+                body: Vec::new(),
+            },
+            Response {
+                status: 200,
+                body: br#"{
+                "tag_name": "1.2.3",
+                "published_at": "2026-01-01T00:00:00Z",
+                "assets": []
+            }"#
+                .to_vec(),
+            },
+        ]);
+
+        let source = GithubSource::try_from("github:owner/repository".to_owned()).unwrap();
+        let client = Client::builder().build().unwrap();
+
+        let release = source
+            .fetch_release_from(&client, "1.2.3", server.url(), Some("secret-token"))
+            .unwrap();
+
+        assert_eq!(release.tag, "1.2.3");
+
+        let requests = server.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0].path,
+            "/repos/owner/repository/releases/tags/v1.2.3"
+        );
+        assert_eq!(
+            requests[1].path,
+            "/repos/owner/repository/releases/tags/1.2.3"
+        );
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.authorization.as_deref() == Some("Bearer secret-token"))
         );
     }
 }

@@ -361,6 +361,7 @@ fn resolve_binloom_release(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::http_fixture::{Response, Server};
 
     #[test]
     fn enforces_minimum_release_age() {
@@ -434,5 +435,67 @@ mod tests {
         let resolved = resolve_checksum(&client, &release, &release.assets[0]).unwrap();
 
         assert_eq!(resolved, (checksum, ChecksumSource::Digest));
+    }
+
+    #[test]
+    fn records_sidecar_checksum_provenance() {
+        let checksum = "b".repeat(64);
+        let server = Server::start(vec![Response {
+            status: 200,
+            body: format!("{checksum}  tool.gz\n").into_bytes(),
+        }]);
+
+        let release = release::Release {
+            tag: "v1.0.0".to_owned(),
+            published_at: None,
+            assets: vec![
+                release::ReleaseAsset {
+                    name: "tool.gz".to_owned(),
+                    download_url: format!("{}/tool.gz", server.url()),
+                    sha256: None,
+                },
+                release::ReleaseAsset {
+                    name: "tool.gz.sha256".to_owned(),
+                    download_url: format!("{}/tool.gz.sha256", server.url()),
+                    sha256: None,
+                },
+            ],
+        };
+        let client = Client::builder().build().unwrap();
+
+        let resolved = resolve_checksum(&client, &release, &release.assets[0]).unwrap();
+
+        assert_eq!(resolved, (checksum, ChecksumSource::Sidecar));
+        assert_eq!(server.requests()[0].path, "/tool.gz.sha256");
+    }
+
+    #[test]
+    fn records_downloaded_checksum_provenance() {
+        let server = Server::start(vec![Response {
+            status: 200,
+            body: b"hello".to_vec(),
+        }]);
+
+        let release = release::Release {
+            tag: "v1.0.0".to_owned(),
+            published_at: None,
+            assets: vec![release::ReleaseAsset {
+                name: "tool.gz".to_owned(),
+                download_url: format!("{}/tool.gz", server.url()),
+                sha256: None,
+            }],
+        };
+        let client = Client::builder().build().unwrap();
+
+        let resolved = resolve_checksum(&client, &release, &release.assets[0]).unwrap();
+
+        assert_eq!(
+            resolved,
+            (
+                "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824".to_owned(),
+                ChecksumSource::Download,
+            )
+        );
+        assert_eq!(server.requests()[0].path, "/tool.gz");
     }
 }
