@@ -1,5 +1,6 @@
 mod download;
 mod init;
+mod install;
 mod list;
 mod lockfile;
 mod manifest;
@@ -34,6 +35,21 @@ enum Command {
     List,
     #[command(about = "Show the path")]
     Path,
+    #[command(about = "Add a tool")]
+    Add {
+        #[arg(
+            short,
+            long,
+            help = "Source of the tool, example = \"github:evilmartians/lefthook\""
+        )]
+        source: String,
+        #[arg(
+            short,
+            long,
+            help = "Version of the tool, example = \"v2.1.10\" or \"2.1.10\""
+        )]
+        version: String,
+    },
 }
 
 fn main() -> ExitCode {
@@ -43,16 +59,17 @@ fn main() -> ExitCode {
         Command::Init => init::init(),
         Command::List => list::list(),
         Command::Update { tool } => update::update(tool.as_deref()),
-        Command::Install => {
-            println!("Installing...");
-            Ok(())
-        }
+        Command::Install => install::install(),
         Command::Exec => {
             println!("Executing...");
             Ok(())
         }
         Command::Path => {
             println!("Showing path...");
+            Ok(())
+        }
+        Command::Add { source, version } => {
+            println!("Adding tool {} with version {}", source, version);
             Ok(())
         }
     };

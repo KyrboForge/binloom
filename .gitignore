@@ -1,3 +1,6 @@
 /target
-binloom.toml
 .idea
+binloom.toml
+binloom.lock
+main
+.tools

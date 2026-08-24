@@ -73,6 +73,43 @@ pub fn text_url(client: &Client, url: &str) -> Result<String> {
     Ok(content)
 }
 
+pub fn download_to(client: &Client, url: &str, mut writer: impl io::Write) -> Result<String> {
+    let mut response = client
+        .get(url)
+        .send()
+        .with_context(|| format!("failed to download {url}"))?
+        .error_for_status()
+        .with_context(|| format!("download failed for {url}"))?;
+
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+
+    loop {
+        let bytes_read = response
+            .read(&mut buffer)
+            .with_context(|| format!("failed to read {url}"))?;
+
+        if bytes_read == 0 {
+            break;
+        }
+
+        writer
+            .write_all(&buffer[..bytes_read])
+            .with_context(|| format!("failed to write download from {url}"))?;
+
+        hasher.update(&buffer[..bytes_read]);
+    }
+
+    let digest = hasher.finalize();
+    let mut checksum = String::with_capacity(digest.len() * 2);
+
+    for byte in digest {
+        write!(&mut checksum, "{byte:02x}").expect("writing to String cannot fail");
+    }
+
+    Ok(checksum)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

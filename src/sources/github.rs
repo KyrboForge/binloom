@@ -82,6 +82,34 @@ pub fn find_asset<'a>(
                     .any(|alias| name.contains(alias))
         })
         .collect();
+    let gzip_matches = matches
+        .iter()
+        .copied()
+        .filter(|asset| asset.name.to_ascii_lowercase().ends_with(".gz"))
+        .collect::<Vec<_>>();
+
+    let matches = if gzip_matches.len() == 1 {
+        gzip_matches
+    } else {
+        matches
+    };
+    let matches = prefer(matches, |asset| {
+        asset
+            .name
+            .to_ascii_lowercase()
+            .contains(platform.os_aliases()[0])
+    });
+
+    let matches = prefer(matches, |asset| {
+        asset
+            .name
+            .to_ascii_lowercase()
+            .contains(platform.arch_aliases()[0])
+    });
+
+    let matches = prefer(matches, |asset| {
+        asset.name.to_ascii_lowercase().ends_with(".gz")
+    });
 
     match matches.as_slice() {
         [asset] => Ok(asset),
@@ -95,6 +123,23 @@ pub fn find_asset<'a>(
 
             bail!("multiple release assets matched {tool_name} for {platform}: {names}")
         }
+    }
+}
+
+fn prefer(
+    assets: Vec<&ReleaseAsset>,
+    predicate: impl Fn(&ReleaseAsset) -> bool,
+) -> Vec<&ReleaseAsset> {
+    let preferred = assets
+        .iter()
+        .copied()
+        .filter(|asset| predicate(asset))
+        .collect::<Vec<_>>();
+
+    if preferred.is_empty() {
+        assets
+    } else {
+        preferred
     }
 }
 
@@ -245,8 +290,8 @@ mod tests {
             tag_name: "v1.0.0".to_owned(),
             published_at: Some("2026-01-01T00:00:00Z".to_owned()),
             assets: vec![
-                asset("tool_1.0.0_linux_amd64.gz"),
                 asset("tool_1.0.0_linux_x86_64.gz"),
+                asset("tool-pro_1.0.0_linux_x86_64.gz"),
             ],
         };
 
@@ -308,5 +353,20 @@ mod tests {
         let matched = find_asset(&release, "tool", Platform::LinuxX86_64).unwrap();
 
         assert_eq!(matched.name, "tool_1.0.0_linux_x86_64.gz");
+    }
+    #[test]
+    fn prefers_gzip_over_raw_asset() {
+        let release = Release {
+            tag_name: "v1.0.0".to_owned(),
+            published_at: Some("2026-01-01T00:00:00Z".to_owned()),
+            assets: vec![
+                asset("tool_1.0.0_MacOS_arm64"),
+                asset("tool_1.0.0_MacOS_arm64.gz"),
+            ],
+        };
+
+        let matched = find_asset(&release, "tool", Platform::MacosAarch64).unwrap();
+
+        assert_eq!(matched.name, "tool_1.0.0_MacOS_arm64.gz");
     }
 }

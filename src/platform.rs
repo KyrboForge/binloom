@@ -10,6 +10,9 @@ pub enum Platform {
 }
 
 impl Platform {
+    pub fn current() -> Result<Self> {
+        Self::try_from((std::env::consts::OS, std::env::consts::ARCH))
+    }
     pub const ALL: [Self; 4] = [
         Self::MacosAarch64,
         Self::MacosX86_64,
