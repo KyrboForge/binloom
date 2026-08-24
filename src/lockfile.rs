@@ -17,6 +17,9 @@ pub struct Lockfile {
 
     #[serde(default)]
     pub tools: BTreeMap<String, LockedTool>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrapper: Option<LockedWrapper>,
 }
 
 impl Default for Lockfile {
@@ -25,6 +28,7 @@ impl Default for Lockfile {
             version: 1,
             binloom: None,
             tools: BTreeMap::new(),
+            wrapper: None,
         }
     }
 }
@@ -52,6 +56,14 @@ pub struct LockedArtifact {
 pub enum ArtifactFormat {
     Raw,
     Gz,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LockedWrapper {
+    pub version: String,
+    pub url: String,
+    pub sha256: String,
 }
 
 impl TryFrom<&Lockfile> for String {
@@ -220,5 +232,24 @@ mod tests {
 
         assert_eq!(binloom.version, "0.1.0");
         assert_eq!(binloom.artifacts["macos-aarch64"].sha256, "b".repeat(64));
+    }
+
+    #[test]
+    fn serializes_wrapper_metadata() {
+        let lockfile = Lockfile {
+            wrapper: Some(LockedWrapper {
+                version: "0.2.0".to_owned(),
+                url: "https://example.com/binloomw".to_owned(),
+                sha256: "a".repeat(64),
+            }),
+            ..Lockfile::default()
+        };
+
+        let content = String::try_from(&lockfile).unwrap();
+
+        assert!(content.contains("[wrapper]"));
+        assert!(content.contains("version = \"0.2.0\""));
+        assert!(content.contains("url = \"https://example.com/binloomw\""));
+        assert!(content.contains(&format!("sha256 = \"{}\"", "a".repeat(64))));
     }
 }
