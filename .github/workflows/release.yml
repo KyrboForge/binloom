@@ -1,0 +1,121 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version without the v prefix, for example 0.1.0
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ inputs.version }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  validate:
+    name: Validate release
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate branch and version
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          test "${GITHUB_REF}" = "refs/heads/main"
+
+          crate_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+          test "${crate_version}" = "${RELEASE_VERSION}"
+
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --all-targets --locked
+
+  build:
+    needs: validate
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            builder: cargo
+            asset: binloom_macos_aarch64
+
+          - runner: macos-14
+            target: x86_64-apple-darwin
+            builder: cargo
+            asset: binloom_macos_x86_64
+
+          - runner: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            builder: cross
+            asset: binloom_linux_aarch64
+
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            builder: cross
+            asset: binloom_linux_x86_64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - if: matrix.builder == 'cross'
+        uses: taiki-e/install-action@cross
+
+      - name: Build
+        run: ${{ matrix.builder }} build --release --locked --target ${{ matrix.target }}
+
+      - name: Compress
+        run: |
+          gzip -9c \
+            target/${{ matrix.target }}/release/binloom \
+            > ${{ matrix.asset }}.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}.gz
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        working-directory: dist
+        run: sha256sum *.gz > SHA256SUMS
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/*.gz
+            dist/SHA256SUMS
