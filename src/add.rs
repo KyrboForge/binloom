@@ -14,15 +14,20 @@ use crate::{
     update,
 };
 
-pub fn add(name: &str, source: &str, version: &str) -> Result<()> {
-    write_tool(Path::new("binloom.toml"), name, source, version)?;
-
+pub fn add(name: &str, source: &str, version: &str, asset: Option<&str>) -> Result<()> {
+    write_tool(Path::new("binloom.toml"), name, source, version, asset)?;
     update::lock().context("tool was added to binloom.toml, but lockfile update failed")?;
 
     install::install()
 }
 
-fn write_tool(path: &Path, name: &str, source: &str, version: &str) -> Result<()> {
+fn write_tool(
+    path: &Path,
+    name: &str,
+    source: &str,
+    version: &str,
+    asset: Option<&str>,
+) -> Result<()> {
     validate_tool_name(name)?;
     validate_version(version)?;
 
@@ -52,7 +57,9 @@ fn write_tool(path: &Path, name: &str, source: &str, version: &str) -> Result<()
         toml::Value::String(version.to_owned())
     )?;
     writeln!(file, "source = {}", toml::Value::String(source.to_string()))?;
-
+    if let Some(asset) = asset {
+        writeln!(file, "asset = {}", toml::Value::String(asset.to_owned()))?;
+    }
     Ok(())
 }
 
@@ -71,14 +78,41 @@ mod tests {
         )
         .unwrap();
 
-        write_tool(&path, "lefthook", "github:evilmartians/lefthook", "2.1.10").unwrap();
-
+        write_tool(
+            &path,
+            "lefthook",
+            "github:evilmartians/lefthook",
+            "2.1.10",
+            None,
+        )
+        .unwrap();
+        write_tool(
+            &path,
+            "example",
+            "github:owner/example",
+            "1.2.3",
+            Some("example_{version}_{os}_{arch}.gz"),
+        )
+        .unwrap();
         let manifest = Manifest::try_from(path.as_path()).unwrap();
 
         assert_eq!(manifest.tools["lefthook"].version, "2.1.10");
+        assert_eq!(
+            manifest.tools["example"].asset.as_deref(),
+            Some("example_{version}_{os}_{arch}.gz")
+        );
 
         let before = fs::read_to_string(&path).unwrap();
-        assert!(write_tool(&path, "lefthook", "github:evilmartians/lefthook", "2.1.10",).is_err());
+        assert!(
+            write_tool(
+                &path,
+                "lefthook",
+                "github:evilmartians/lefthook",
+                "2.1.10",
+                None
+            )
+            .is_err()
+        );
         assert_eq!(fs::read_to_string(path).unwrap(), before);
     }
 }

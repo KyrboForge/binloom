@@ -65,9 +65,9 @@ fn update_tools(tool_name: Option<&str>, latest: bool) -> Result<()> {
 
     for (name, tool) in selected {
         let locked = if latest {
-            resolve_latest_tool(name, &tool.source, minimum_age, &client)?
+            resolve_latest_tool(name, tool, minimum_age, &client)?
         } else {
-            resolve_tool(name, &tool.version, &tool.source, minimum_age, &client)?
+            resolve_tool(name, tool, minimum_age, &client)?
         };
 
         versions.insert(name.to_owned(), locked.version.clone());
@@ -111,23 +111,41 @@ fn update_tools(tool_name: Option<&str>, latest: bool) -> Result<()> {
 
 fn resolve_latest_tool(
     name: &str,
-    source: &Source,
+    tool: &Tool,
     minimum_age_minutes: u64,
     client: &Client,
 ) -> Result<LockedTool> {
-    let release = source.provider().fetch_latest_release(client)?;
-    resolve_release(name, source, &release, minimum_age_minutes, client)
+    let release = tool.source.provider().fetch_latest_release(client)?;
+
+    resolve_release(
+        name,
+        &tool.source,
+        tool.asset.as_deref(),
+        &release,
+        minimum_age_minutes,
+        client,
+    )
 }
 
 fn resolve_tool(
     name: &str,
-    version: &str,
-    source: &Source,
+    tool: &Tool,
     minimum_age_minutes: u64,
     client: &Client,
 ) -> Result<LockedTool> {
-    let release = source.provider().fetch_release(client, version)?;
-    resolve_release(name, source, &release, minimum_age_minutes, client)
+    let release = tool
+        .source
+        .provider()
+        .fetch_release(client, &tool.version)?;
+
+    resolve_release(
+        name,
+        &tool.source,
+        tool.asset.as_deref(),
+        &release,
+        minimum_age_minutes,
+        client,
+    )
 }
 
 fn resolve_checksum(
@@ -153,16 +171,20 @@ fn version_from_tag(tag: &str) -> Result<String> {
 fn resolve_release(
     name: &str,
     source: &Source,
+    asset_pattern: Option<&str>,
     release: &release::Release,
     minimum_age_minutes: u64,
     client: &Client,
 ) -> Result<LockedTool> {
     println!("Found {} for {name}:", release.tag);
     ensure_minimum_release_age(release, minimum_age_minutes, OffsetDateTime::now_utc())?;
-
+    let version = version_from_tag(&release.tag)?;
     let mut artifacts = BTreeMap::new();
     for platform in Platform::ALL {
-        let asset = release.find_asset(name, platform)?;
+        let asset = match asset_pattern {
+            Some(pattern) => release.find_asset_by_pattern(pattern, &version, platform)?,
+            None => release.find_asset(name, platform)?,
+        };
         let checksum = resolve_checksum(client, release, asset)?;
         artifacts.insert(
             platform.to_string(),
@@ -176,7 +198,7 @@ fn resolve_release(
     }
 
     Ok(LockedTool {
-        version: version_from_tag(&release.tag)?,
+        version,
         source: source.to_string(),
         tag: release.tag.clone(),
         artifacts,
@@ -299,8 +321,14 @@ fn resolve_binloom_release(
     minimum_age_minutes: u64,
     client: &Client,
 ) -> Result<(LockedTool, LockedWrapper)> {
-    let binloom = resolve_release("binloom", source, release, minimum_age_minutes, client)?;
-
+    let binloom = resolve_release(
+        "binloom",
+        source,
+        None,
+        release,
+        minimum_age_minutes,
+        client,
+    )?;
     let asset = release.find_asset_by_name("binloomw")?;
     let sha256 = resolve_checksum(client, release, asset)?;
 

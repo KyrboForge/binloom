@@ -18,6 +18,52 @@ pub struct ReleaseAsset {
 }
 
 impl Release {
+    pub fn find_asset_by_pattern(
+        &self,
+        pattern: &str,
+        version: &str,
+        platform: Platform,
+    ) -> anyhow::Result<&ReleaseAsset> {
+        let candidates = platform
+            .os_aliases()
+            .iter()
+            .flat_map(|os| {
+                platform.arch_aliases().iter().map(move |arch| {
+                    pattern
+                        .replace("{version}", version)
+                        .replace("{os}", os)
+                        .replace("{arch}", arch)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let matches = self
+            .assets
+            .iter()
+            .filter(|asset| {
+                candidates
+                    .iter()
+                    .any(|candidate| asset.name.eq_ignore_ascii_case(candidate))
+            })
+            .collect::<Vec<_>>();
+
+        match matches.as_slice() {
+            [asset] => Ok(asset),
+            [] => bail!(
+                "release {} has no asset matching pattern {pattern} for {platform}",
+                self.tag
+            ),
+            assets => {
+                let names = assets
+                    .iter()
+                    .map(|asset| asset.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+
+                bail!("multiple release assets matched pattern {pattern} for {platform}: {names}")
+            }
+        }
+    }
     pub fn find_asset(&self, tool_name: &str, platform: Platform) -> anyhow::Result<&ReleaseAsset> {
         let tool_name = tool_name.to_lowercase();
 
@@ -364,5 +410,34 @@ mod tests {
             error.to_string(),
             "release v0.2.0 has no asset named missing"
         );
+    }
+
+    #[test]
+    fn expands_asset_pattern_for_every_platform() {
+        let release = Release {
+            tag: "v1.2.3".to_owned(),
+            published_at: None,
+            assets: vec![
+                asset("tool_1.2.3_MacOS_arm64.gz"),
+                asset("tool_1.2.3_MacOS_x86_64.gz"),
+                asset("tool_1.2.3_Linux_aarch64.gz"),
+                asset("tool_1.2.3_Linux_x86_64.gz"),
+            ],
+        };
+
+        let expected = [
+            (Platform::MacosAarch64, "tool_1.2.3_MacOS_arm64.gz"),
+            (Platform::MacosX86_64, "tool_1.2.3_MacOS_x86_64.gz"),
+            (Platform::LinuxAarch64, "tool_1.2.3_Linux_aarch64.gz"),
+            (Platform::LinuxX86_64, "tool_1.2.3_Linux_x86_64.gz"),
+        ];
+
+        for (platform, expected_name) in expected {
+            let matched = release
+                .find_asset_by_pattern("tool_{version}_{os}_{arch}.gz", "1.2.3", platform)
+                .unwrap();
+
+            assert_eq!(matched.name, expected_name);
+        }
     }
 }

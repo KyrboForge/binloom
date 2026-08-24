@@ -62,6 +62,12 @@ enum Command {
             long,
             help = "Version of the tool, example = \"v2.1.10\" or \"2.1.10\""
         )]
+        #[arg(
+            short,
+            long,
+            help = "Optional release asset pattern, for example tool_{version}_{os}_{arch}.gz"
+        )]
+        asset: Option<String>,
         version: String,
     },
 }
@@ -86,7 +92,8 @@ fn main() -> ExitCode {
             name,
             source,
             version,
-        } => add::add(name, source, version),
+            asset,
+        } => add::add(name, source, version, asset.as_deref()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
