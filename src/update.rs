@@ -93,6 +93,8 @@ fn update_tools(tool_name: Option<&str>, latest: bool) -> Result<()> {
         None
     };
 
+    lockfile.write(lock_path)?;
+
     if latest {
         manifest::update_versions(
             Path::new("binloom.toml"),
@@ -102,7 +104,6 @@ fn update_tools(tool_name: Option<&str>, latest: bool) -> Result<()> {
                 .map(|(name, version)| (name.as_str(), version.as_str())),
         )?;
     }
-    lockfile.write(lock_path)?;
 
     println!("Updated {}", lock_path.display());
 
@@ -298,12 +299,13 @@ pub fn update_binloom() -> Result<()> {
     let version = locked.version.clone();
     lockfile.binloom = Some(locked);
     lockfile.wrapper = Some(wrapper);
+    lockfile.write(lock_path)?;
+
     manifest::update_versions(
         lock_path.with_file_name("binloom.toml").as_path(),
         Some(&version),
         [],
     )?;
-    lockfile.write(lock_path)?;
 
     println!("Updated Binloom in {}", lock_path.display());
 

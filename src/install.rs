@@ -1,6 +1,7 @@
 use crate::{
     download,
     lockfile::{ArtifactFormat, Lockfile},
+    manifest::Manifest,
     platform::Platform,
     update,
 };
@@ -21,8 +22,10 @@ pub fn install() -> Result<()> {
     {
         update::update(None)?;
     }
-
+    let manifest = Manifest::try_from(Path::new("binloom.toml"))?;
     let lockfile = Lockfile::try_from(lock_path)?;
+
+    ensure_manifest_matches_lockfile(&manifest, &lockfile)?;
     ensure!(!lockfile.tools.is_empty(), "no tools in binloom.lock");
 
     let platform = Platform::current()?;
@@ -92,6 +95,22 @@ pub fn install() -> Result<()> {
     Ok(())
 }
 
+fn ensure_manifest_matches_lockfile(manifest: &Manifest, lockfile: &Lockfile) -> Result<()> {
+    let matches = manifest.tools.len() == lockfile.tools.len()
+        && manifest.tools.iter().all(|(name, tool)| {
+            lockfile.tools.get(name).is_some_and(|locked| {
+                locked.version == tool.version && locked.source == tool.source.to_string()
+            })
+        });
+
+    ensure!(
+        matches,
+        "binloom.toml and binloom.lock are out of sync; run `binloom update`"
+    );
+
+    Ok(())
+}
+
 fn cached_artifact_matches(
     destination: &Path,
     checksum_stamp: &Path,
@@ -148,7 +167,13 @@ fn link_tool(name: &str, version: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        lockfile::LockedTool,
+        manifest::{Binloom, Tool, UpdateConfig},
+        sources::Source,
+    };
     use flate2::{Compression, write::GzEncoder};
+    use std::collections::BTreeMap;
 
     #[test]
     fn unpacks_raw_and_gzip() {
@@ -186,5 +211,58 @@ mod tests {
         std::fs::write(&checksum_stamp, "expected\n").unwrap();
 
         assert!(cached_artifact_matches(&destination, &checksum_stamp, "expected").unwrap());
+    }
+
+    #[test]
+    fn rejects_manifest_and_lockfile_drift() {
+        let manifest = Manifest {
+            version: 1,
+            binloom: Binloom {
+                version: "0.2.2".to_owned(),
+            },
+            tools: BTreeMap::from([(
+                "tool".to_owned(),
+                Tool {
+                    version: "1.0.0".to_owned(),
+                    source: Source::try_from("github:owner/tool".to_owned()).unwrap(),
+                    asset: None,
+                },
+            )]),
+            update: UpdateConfig::default(),
+        };
+
+        let mut lockfile = Lockfile::default();
+        lockfile.tools.insert(
+            "tool".to_owned(),
+            LockedTool {
+                version: "1.0.0".to_owned(),
+                source: "github:owner/tool".to_owned(),
+                tag: "v1.0.0".to_owned(),
+                artifacts: BTreeMap::new(),
+            },
+        );
+
+        assert!(ensure_manifest_matches_lockfile(&manifest, &lockfile).is_ok());
+
+        lockfile.tools.get_mut("tool").unwrap().version = "2.0.0".to_owned();
+
+        let error = ensure_manifest_matches_lockfile(&manifest, &lockfile).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "binloom.toml and binloom.lock are out of sync; run `binloom update`"
+        );
+
+        lockfile.tools.get_mut("tool").unwrap().version = "1.0.0".to_owned();
+        lockfile.tools.insert(
+            "extra".to_owned(),
+            LockedTool {
+                version: "1.0.0".to_owned(),
+                source: "github:owner/extra".to_owned(),
+                tag: "v1.0.0".to_owned(),
+                artifacts: BTreeMap::new(),
+            },
+        );
+
+        assert!(ensure_manifest_matches_lockfile(&manifest, &lockfile).is_err());
     }
 }
