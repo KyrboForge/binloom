@@ -24,9 +24,17 @@ esac
 
 download_file() {
     if command -v curl >/dev/null 2>&1; then
-        curl --fail --location --silent --show-error --output "$2" "$1"
+        curl --fail --location --silent --show-error \
+            --connect-timeout 10 \
+            --max-time 600 \
+            --output "$2" \
+            "$1"
     elif command -v wget >/dev/null 2>&1; then
-        wget --quiet --output-document="$2" "$1"
+        wget --quiet \
+            --timeout=30 \
+            --tries=3 \
+            --output-document="$2" \
+            "$1"
     else
         echo "error: curl or wget is required to download Binloom" >&2
         return 1

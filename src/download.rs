@@ -1,15 +1,20 @@
 use std::{
     fmt::Write,
     io::{self, Read},
+    time::Duration,
 };
 
 use anyhow::{Context, Result, ensure};
 use reqwest::blocking::Client;
 use sha2::{Digest, Sha256};
 
+const MAX_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
+
 pub fn client() -> Result<Client> {
     Client::builder()
         .user_agent(concat!("binloom/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(10 * 60))
         .build()
         .context("failed to create HTTP client")
 }
@@ -22,12 +27,20 @@ pub fn sha256_url(client: &Client, url: &str) -> Result<String> {
         .error_for_status()
         .with_context(|| format!("download failed for {url}"))?;
 
-    sha256(&mut response).with_context(|| format!("failed to hash {url}"))
+    sha256(&mut response, MAX_DOWNLOAD_BYTES).with_context(|| format!("failed to hash {url}"))
+}
+fn sha256(reader: impl Read, max_bytes: u64) -> io::Result<String> {
+    copy_and_sha256(reader, io::sink(), max_bytes)
 }
 
-fn sha256(mut reader: impl Read) -> io::Result<String> {
+fn copy_and_sha256(
+    mut reader: impl Read,
+    mut writer: impl io::Write,
+    max_bytes: u64,
+) -> io::Result<String> {
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
+    let mut total = 0_u64;
 
     loop {
         let bytes_read = reader.read(&mut buffer)?;
@@ -36,8 +49,18 @@ fn sha256(mut reader: impl Read) -> io::Result<String> {
             break;
         }
 
+        total += bytes_read as u64;
+
+        if total > max_bytes {
+            return Err(io::Error::other(format!(
+                "download exceeds {max_bytes} bytes"
+            )));
+        }
+
+        writer.write_all(&buffer[..bytes_read])?;
         hasher.update(&buffer[..bytes_read]);
     }
+
     let digest = hasher.finalize();
     let mut checksum = String::with_capacity(digest.len() * 2);
 
@@ -81,33 +104,8 @@ pub fn download_to(client: &Client, url: &str, mut writer: impl io::Write) -> Re
         .error_for_status()
         .with_context(|| format!("download failed for {url}"))?;
 
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-
-    loop {
-        let bytes_read = response
-            .read(&mut buffer)
-            .with_context(|| format!("failed to read {url}"))?;
-
-        if bytes_read == 0 {
-            break;
-        }
-
-        writer
-            .write_all(&buffer[..bytes_read])
-            .with_context(|| format!("failed to write download from {url}"))?;
-
-        hasher.update(&buffer[..bytes_read]);
-    }
-
-    let digest = hasher.finalize();
-    let mut checksum = String::with_capacity(digest.len() * 2);
-
-    for byte in digest {
-        write!(&mut checksum, "{byte:02x}").expect("writing to String cannot fail");
-    }
-
-    Ok(checksum)
+    copy_and_sha256(&mut response, &mut writer, MAX_DOWNLOAD_BYTES)
+        .with_context(|| format!("failed to store download from {url}"))
 }
 
 #[cfg(test)]
@@ -116,11 +114,20 @@ mod tests {
 
     #[test]
     fn calculates_sha256() {
-        let checksum = sha256("hello".as_bytes()).unwrap();
+        let checksum = sha256("hello".as_bytes(), MAX_DOWNLOAD_BYTES).unwrap();
 
         assert_eq!(
             checksum,
             "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
         );
+    }
+    #[test]
+    fn rejects_downloads_over_limit() {
+        let mut output = Vec::new();
+
+        let error = copy_and_sha256("hello".as_bytes(), &mut output, 4).unwrap_err();
+
+        assert!(error.to_string().contains("exceeds 4 bytes"));
+        assert!(output.is_empty());
     }
 }
