@@ -1,3 +1,4 @@
+mod add;
 mod download;
 mod exec;
 mod init;
@@ -43,6 +44,8 @@ enum Command {
     Path,
     #[command(about = "Add a tool")]
     Add {
+        /// Name used as the installed command
+        name: String,
         #[arg(
             short,
             long,
@@ -68,10 +71,11 @@ fn main() -> ExitCode {
         Command::Install => install::install(),
         Command::Exec { command } => exec::exec(command),
         Command::Path => path::path(),
-        Command::Add { source, version } => {
-            println!("Adding tool {} with version {}", source, version);
-            Ok(())
-        }
+        Command::Add {
+            name,
+            source,
+            version,
+        } => add::add(name, source, version),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
