@@ -1,4 +1,5 @@
 mod download;
+mod exec;
 mod init;
 mod install;
 mod list;
@@ -10,6 +11,7 @@ mod sources;
 mod update;
 
 use clap::{Parser, Subcommand};
+use std::ffi::OsString;
 use std::process::ExitCode;
 
 #[derive(Parser)]
@@ -30,8 +32,11 @@ enum Command {
         /// Tool to update; omit to update all tools
         tool: Option<String>,
     },
-    #[command(about = "Execute a command")]
-    Exec,
+    #[command(about = "Execute a command with local tools available")]
+    Exec {
+        #[arg(required = true, trailing_var_arg = true)]
+        command: Vec<OsString>,
+    },
     #[command(about = "List the tools")]
     List,
     #[command(about = "Show the path")]
@@ -61,10 +66,7 @@ fn main() -> ExitCode {
         Command::List => list::list(),
         Command::Update { tool } => update::update(tool.as_deref()),
         Command::Install => install::install(),
-        Command::Exec => {
-            println!("Executing...");
-            Ok(())
-        }
+        Command::Exec { command } => exec::exec(command),
         Command::Path => path::path(),
         Command::Add { source, version } => {
             println!("Adding tool {} with version {}", source, version);
