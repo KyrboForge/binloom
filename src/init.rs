@@ -220,6 +220,15 @@ format = "raw"
             String::from_utf8(first.stdout).unwrap(),
             "fake binloom: hello world\n"
         );
+        assert_eq!(
+            fs::read_to_string(
+                directory
+                    .path()
+                    .join(".tools/binloom/test/.artifact-sha256")
+            )
+            .unwrap(),
+            format!("{checksum}\n")
+        );
 
         fs::remove_file(asset).unwrap();
 
@@ -236,6 +245,17 @@ format = "raw"
                 .join(".tools/binloom/test/binloom")
                 .is_file()
         );
+        fs::write(
+            directory
+                .path()
+                .join(".tools/binloom/test/.artifact-sha256"),
+            "different\n",
+        )
+        .unwrap();
+
+        let stale = run();
+        assert!(!stale.status.success());
+        assert!(stale.stdout.is_empty());
     }
 
     #[test]

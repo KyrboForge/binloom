@@ -1,8 +1,3 @@
-use std::{
-    io::{self, Read, Write},
-    path::Path,
-};
-
 use crate::{
     download,
     lockfile::{ArtifactFormat, Lockfile},
@@ -11,6 +6,11 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use flate2::read::GzDecoder;
+use std::{
+    fs,
+    io::{self, Read, Write},
+    path::Path,
+};
 
 pub fn install() -> Result<()> {
     let lock_path = Path::new("binloom.lock");
@@ -37,12 +37,13 @@ pub fn install() -> Result<()> {
 
         let directory = Path::new(".tools").join(name).join(&tool.version);
 
-        std::fs::create_dir_all(&directory)
+        fs::create_dir_all(&directory)
             .with_context(|| format!("failed to create {}", directory.display()))?;
 
         let destination = directory.join(name);
+        let checksum_stamp = directory.join(".artifact-sha256");
 
-        if destination.is_file() {
+        if cached_artifact_matches(&destination, &checksum_stamp, &artifact.sha256)? {
             println!("Already installed {name} {}", tool.version);
             link_tool(name, &tool.version)?;
             continue;
@@ -70,7 +71,7 @@ pub fn install() -> Result<()> {
 
             executable
                 .as_file()
-                .set_permissions(std::fs::Permissions::from_mode(0o755))?;
+                .set_permissions(fs::Permissions::from_mode(0o755))?;
         }
 
         executable.as_file().sync_all()?;
@@ -79,6 +80,10 @@ pub fn install() -> Result<()> {
             .persist(&destination)
             .map_err(|error| error.error)
             .with_context(|| format!("failed to install {}", destination.display()))?;
+
+        fs::write(&checksum_stamp, format!("{}\n", artifact.sha256))
+            .with_context(|| format!("failed to write {}", checksum_stamp.display()))?;
+
         link_tool(name, &tool.version)?;
 
         println!("Installed {name} {}", tool.version);
@@ -86,6 +91,28 @@ pub fn install() -> Result<()> {
 
     Ok(())
 }
+
+fn cached_artifact_matches(
+    destination: &Path,
+    checksum_stamp: &Path,
+    expected_sha256: &str,
+) -> Result<bool> {
+    if !destination.is_file() {
+        return Ok(false);
+    }
+
+    let installed_sha256 = match fs::read_to_string(checksum_stamp) {
+        Ok(checksum) => checksum,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to read {}", checksum_stamp.display()));
+        }
+    };
+
+    Ok(installed_sha256.trim() == expected_sha256)
+}
+
 fn unpack(
     format: ArtifactFormat,
     mut source: impl Read,
@@ -101,12 +128,12 @@ fn unpack(
 fn link_tool(name: &str, version: &str) -> Result<()> {
     let bin_directory = Path::new(".tools/.bin");
 
-    std::fs::create_dir_all(bin_directory).context("failed to create .tools/.bin")?;
+    fs::create_dir_all(bin_directory).context("failed to create .tools/.bin")?;
 
     let link = bin_directory.join(name);
     let target = Path::new("..").join(name).join(version).join(name);
 
-    match std::fs::remove_file(&link) {
+    match fs::remove_file(&link) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
@@ -138,5 +165,26 @@ mod tests {
         let mut gzip = Vec::new();
         unpack(ArtifactFormat::Gz, &compressed[..], &mut gzip).unwrap();
         assert_eq!(gzip, input);
+    }
+
+    #[test]
+    fn reuses_cache_only_with_matching_checksum_stamp() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("tool");
+        let checksum_stamp = directory.path().join(".artifact-sha256");
+
+        assert!(!cached_artifact_matches(&destination, &checksum_stamp, "expected").unwrap());
+
+        std::fs::write(&destination, "binary").unwrap();
+
+        assert!(!cached_artifact_matches(&destination, &checksum_stamp, "expected").unwrap());
+
+        std::fs::write(&checksum_stamp, "different\n").unwrap();
+
+        assert!(!cached_artifact_matches(&destination, &checksum_stamp, "expected").unwrap());
+
+        std::fs::write(&checksum_stamp, "expected\n").unwrap();
+
+        assert!(cached_artifact_matches(&destination, &checksum_stamp, "expected").unwrap());
     }
 }

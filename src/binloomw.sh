@@ -161,8 +161,11 @@ if ! validate_version "$VERSION"; then
 fi
 INSTALL_DIR="$ROOT_DIR/.tools/binloom/$VERSION"
 BINLOOM="$INSTALL_DIR/binloom"
+CHECKSUM_STAMP="$INSTALL_DIR/.artifact-sha256"
 
-if [ -x "$BINLOOM" ]; then
+if [ -x "$BINLOOM" ] &&
+    [ -f "$CHECKSUM_STAMP" ] &&
+    [ "$(cat "$CHECKSUM_STAMP")" = "$SHA256" ]; then
     exec "$BINLOOM" "$@"
 fi
 
@@ -196,6 +199,7 @@ esac
 
 chmod 755 "$BINARY_TMP"
 mv "$BINARY_TMP" "$BINLOOM"
+printf '%s\n' "$SHA256" > "$CHECKSUM_STAMP"
 
 rm -f "$ARCHIVE"
 trap - EXIT HUP INT TERM
