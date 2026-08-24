@@ -19,11 +19,20 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    #[command(about = "Initialize the repository")]
     Init,
+    #[command(about = "Install the tools")]
     Install,
-    Update { tool: Option<String> },
+    #[command(about = "Update the tools")]
+    Update {
+        /// Tool to update; omit to update all tools
+        tool: Option<String>,
+    },
+    #[command(about = "Execute a command")]
     Exec,
+    #[command(about = "List the tools")]
     List,
+    #[command(about = "Show the path")]
     Path,
 }
 
