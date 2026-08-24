@@ -32,6 +32,10 @@ enum Command {
     Update {
         /// Tool to update; omit to update all tools
         tool: Option<String>,
+
+        /// Update the locked Binloom binary
+        #[arg(long = "self", conflicts_with = "tool")]
+        update_self: bool,
     },
     #[command(about = "Execute a command with local tools available")]
     Exec {
@@ -67,7 +71,13 @@ fn main() -> ExitCode {
     let result = match &cli.command {
         Command::Init => init::init(),
         Command::List => list::list(),
-        Command::Update { tool } => update::update(tool.as_deref()),
+        Command::Update { tool, update_self } => {
+            if *update_self {
+                update::update_binloom()
+            } else {
+                update::update(tool.as_deref())
+            }
+        }
         Command::Install => install::install(),
         Command::Exec { command } => exec::exec(command),
         Command::Path => path::path(),

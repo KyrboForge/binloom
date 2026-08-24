@@ -12,6 +12,9 @@ pub struct Lockfile {
     #[serde(rename = "lock-version")]
     pub version: u32,
 
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binloom: Option<LockedTool>,
+
     #[serde(default)]
     pub tools: BTreeMap<String, LockedTool>,
 }
@@ -20,6 +23,7 @@ impl Default for Lockfile {
     fn default() -> Self {
         Self {
             version: 1,
+            binloom: None,
             tools: BTreeMap::new(),
         }
     }
@@ -181,5 +185,40 @@ mod tests {
             loaded.tools["lefthook"].artifacts["linux-x86_64"].sha256,
             "a".repeat(64)
         );
+    }
+
+    #[test]
+    fn roundtrips_locked_binloom_binary() {
+        let mut artifacts = BTreeMap::new();
+
+        artifacts.insert(
+            "macos-aarch64".to_owned(),
+            LockedArtifact {
+                asset: "binloom_macos_aarch64.gz".to_owned(),
+                url: "https://example.com/binloom.gz".to_owned(),
+                sha256: "b".repeat(64),
+                format: ArtifactFormat::Gz,
+            },
+        );
+
+        let mut lockfile = Lockfile::default();
+
+        lockfile.binloom = Some(LockedTool {
+            version: "0.1.0".to_owned(),
+            source: "github:KyrboForge/binloom".to_owned(),
+            tag: "v0.1.0".to_owned(),
+            artifacts,
+        });
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("binloom.lock");
+
+        lockfile.write(&path).unwrap();
+
+        let loaded = Lockfile::try_from(path.as_path()).unwrap();
+        let binloom = loaded.binloom.unwrap();
+
+        assert_eq!(binloom.version, "0.1.0");
+        assert_eq!(binloom.artifacts["macos-aarch64"].sha256, "b".repeat(64));
     }
 }

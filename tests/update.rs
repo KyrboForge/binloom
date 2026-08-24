@@ -55,3 +55,20 @@ source = "github:evilmartians/lefthook"
         "error: tool missing is not configured\n"
     );
 }
+
+#[test]
+fn self_update_conflicts_with_tool_name() {
+    let output = run_update(
+        r#"manifest-version = 1
+
+[binloom]
+version = "0.1.0"
+"#,
+        &["lefthook", "--self"],
+    );
+
+    assert!(!output.status.success());
+
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(error.contains("cannot be used with"));
+}
