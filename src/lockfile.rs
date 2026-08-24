@@ -152,17 +152,15 @@ mod tests {
             },
         );
 
-        let mut lockfile = Lockfile::default();
-
-        lockfile.tools.insert(
-            "lefthook".to_owned(),
-            LockedTool {
-                version: "2.1.10".to_owned(),
-                source: "github:evilmartians/lefthook".to_owned(),
-                tag: "v2.1.10".to_owned(),
+        let lockfile = Lockfile {
+            binloom: Some(LockedTool {
+                version: "0.1.0".to_owned(),
+                source: "github:KyrboForge/binloom".to_owned(),
+                tag: "v0.1.0".to_owned(),
                 artifacts,
-            },
-        );
+            }),
+            ..Lockfile::default()
+        };
 
         let first: String = (&lockfile).try_into().unwrap();
         let second: String = (&lockfile).try_into().unwrap();

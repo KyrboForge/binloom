@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Validate branch and version
         env:
@@ -68,7 +68,7 @@ jobs:
             asset: binloom_linux_x86_64
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -101,7 +101,7 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/download-artifact@v4
         with:
@@ -114,6 +114,9 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ inputs.version }}
+          name: v${{ inputs.version }}
+          target_commitish: ${{ github.sha }}
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
