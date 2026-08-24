@@ -8,7 +8,6 @@ on:
 
 permissions:
   contents: read
-  code-quality: write
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -55,26 +54,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --all-targets --locked
-
-  coverage:
-    name: Coverage
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - name: Generate coverage report
+      - if: matrix.os == 'ubuntu-latest'
+        run: rustup component add llvm-tools-preview
+      - if: matrix.os == 'ubuntu-latest'
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Run tests with coverage
+        if: matrix.os == 'ubuntu-latest'
         run: cargo llvm-cov --all-targets --locked --cobertura --output-path coverage.xml --fail-under-lines 60
-      - name: Upload coverage report
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-        uses: actions/upload-code-coverage@v1
-        with:
-          file: coverage.xml
-          language: Rust
-          label: code-coverage/cargo-llvm-cov
+      - name: Run tests
+        if: matrix.os != 'ubuntu-latest'
+        run: cargo test --all-targets --locked
