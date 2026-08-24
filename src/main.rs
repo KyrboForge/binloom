@@ -4,6 +4,7 @@ mod install;
 mod list;
 mod lockfile;
 mod manifest;
+mod path;
 mod platform;
 mod sources;
 mod update;
@@ -64,10 +65,7 @@ fn main() -> ExitCode {
             println!("Executing...");
             Ok(())
         }
-        Command::Path => {
-            println!("Showing path...");
-            Ok(())
-        }
+        Command::Path => path::path(),
         Command::Add { source, version } => {
             println!("Adding tool {} with version {}", source, version);
             Ok(())
@@ -76,7 +74,7 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("error: {error}");
+            eprintln!("error: {error:#}");
             ExitCode::FAILURE
         }
     }

@@ -13,8 +13,16 @@ use anyhow::{Context, Result, ensure};
 use flate2::read::GzDecoder;
 
 pub fn install() -> Result<()> {
-    update::update(None)?;
-    let lockfile = Lockfile::try_from(Path::new("binloom.lock"))?;
+    let lock_path = Path::new("binloom.lock");
+
+    if !lock_path
+        .try_exists()
+        .context("failed to check binloom.lock")?
+    {
+        update::update(None)?;
+    }
+
+    let lockfile = Lockfile::try_from(lock_path)?;
     ensure!(!lockfile.tools.is_empty(), "no tools in binloom.lock");
 
     let platform = Platform::current()?;
@@ -36,6 +44,7 @@ pub fn install() -> Result<()> {
 
         if destination.is_file() {
             println!("Already installed {name} {}", tool.version);
+            link_tool(name, &tool.version)?;
             continue;
         }
 
@@ -70,6 +79,7 @@ pub fn install() -> Result<()> {
             .persist(&destination)
             .map_err(|error| error.error)
             .with_context(|| format!("failed to install {}", destination.display()))?;
+        link_tool(name, &tool.version)?;
 
         println!("Installed {name} {}", tool.version);
     }
@@ -85,6 +95,27 @@ fn unpack(
         ArtifactFormat::Raw => io::copy(&mut source, &mut destination),
         ArtifactFormat::Gz => io::copy(&mut GzDecoder::new(source), &mut destination),
     }
+}
+
+#[cfg(unix)]
+fn link_tool(name: &str, version: &str) -> Result<()> {
+    let bin_directory = Path::new(".tools/.bin");
+
+    std::fs::create_dir_all(bin_directory).context("failed to create .tools/.bin")?;
+
+    let link = bin_directory.join(name);
+    let target = Path::new("..").join(name).join(version).join(name);
+
+    match std::fs::remove_file(&link) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to replace {}", link.display()));
+        }
+    }
+
+    std::os::unix::fs::symlink(&target, &link)
+        .with_context(|| format!("failed to link {}", link.display()))
 }
 
 #[cfg(test)]

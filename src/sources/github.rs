@@ -29,9 +29,13 @@ pub fn fetch_release(client: &Client, source: &GithubSource, version: &str) -> R
             "https://api.github.com/repos/{}/{}/releases/tags/{tag}",
             source.owner, source.repository
         );
+        let mut request = client.get(&url);
 
-        let response = client
-            .get(&url)
+        if let Ok(token) = std::env::var("GITHUB_TOKEN").or_else(|_| std::env::var("GH_TOKEN")) {
+            request = request.bearer_auth(token);
+        }
+
+        let response = request
             .send()
             .with_context(|| format!("failed to fetch GitHub release {tag}"))?;
 
