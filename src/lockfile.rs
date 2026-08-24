@@ -151,16 +151,17 @@ mod tests {
                 format: ArtifactFormat::Gz,
             },
         );
+        let mut lockfile = Lockfile::default();
 
-        let lockfile = Lockfile {
-            binloom: Some(LockedTool {
-                version: "0.1.0".to_owned(),
-                source: "github:KyrboForge/binloom".to_owned(),
-                tag: "v0.1.0".to_owned(),
+        lockfile.tools.insert(
+            "lefthook".to_owned(),
+            LockedTool {
+                version: "2.1.10".to_owned(),
+                source: "github:evilmartians/lefthook".to_owned(),
+                tag: "v2.1.10".to_owned(),
                 artifacts,
-            }),
-            ..Lockfile::default()
-        };
+            },
+        );
 
         let first: String = (&lockfile).try_into().unwrap();
         let second: String = (&lockfile).try_into().unwrap();
@@ -199,14 +200,15 @@ mod tests {
             },
         );
 
-        let mut lockfile = Lockfile::default();
-
-        lockfile.binloom = Some(LockedTool {
-            version: "0.1.0".to_owned(),
-            source: "github:KyrboForge/binloom".to_owned(),
-            tag: "v0.1.0".to_owned(),
-            artifacts,
-        });
+        let lockfile = Lockfile {
+            binloom: Some(LockedTool {
+                version: "0.1.0".to_owned(),
+                source: "github:KyrboForge/binloom".to_owned(),
+                tag: "v0.1.0".to_owned(),
+                artifacts,
+            }),
+            ..Lockfile::default()
+        };
 
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("binloom.lock");
