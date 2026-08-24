@@ -32,10 +32,10 @@ jobs:
       version: ${{ steps.release.outputs.version }}
 
     steps:
-      - uses: KyrboForge/actions/release-token@028bb6df095a07b38bb6b0df7ad4861b1e415b2b
+      - uses: KyrboForge/actions/release-token@749e48b925f1911fa8fee07ef98403acb2718570
         id: release-token
         with:
-          app-id: ${{ vars.RELEASE_APP_ID }}
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
 
       - uses: actions/checkout@v7
