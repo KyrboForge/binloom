@@ -1,11 +1,11 @@
 mod init;
 
-use std::process::ExitCode;
 use clap::{Parser, Subcommand};
+use std::process::ExitCode;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about)]
-struct CLI {
+struct Cli {
     #[command(subcommand)]
     command: Command,
 }
@@ -21,25 +21,30 @@ enum Command {
 }
 
 fn main() -> ExitCode {
-    let cli = CLI::parse();
+    let cli = Cli::parse();
 
     let result = match &cli.command {
         Command::Init => init::init(),
-        Command::Install => Ok({
+        Command::Install => {
             println!("Installing...");
-        }),
-        Command::Update => Ok({
+            Ok(())
+        }
+        Command::Update => {
             println!("Updating...");
-        }),
-        Command::Exec => Ok({
+            Ok(())
+        }
+        Command::Exec => {
             println!("Executing...");
-        }),
-        Command::List => Ok({
+            Ok(())
+        }
+        Command::List => {
             println!("Listing...");
-        }),
-        Command::Path => Ok({
+            Ok(())
+        }
+        Command::Path => {
             println!("Showing path...");
-        }),
+            Ok(())
+        }
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

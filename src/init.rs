@@ -1,5 +1,5 @@
 use std::{
-    fs::OpenOptions,
+    fs::{self, OpenOptions},
     io::{self, Write},
     path::Path,
 };
@@ -7,20 +7,24 @@ use std::{
 pub fn init() -> io::Result<()> {
     println!("Initializing Binloom...");
 
-    match generate_manifest(Path::new("binloom.toml")) {
-        Ok(()) => {
-            println!("Created binloom.toml");
-            Ok(())
-        }
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Err(
-            io::Error::new(
+    if let Err(error) = generate_manifest(Path::new("binloom.toml")) {
+        if error.kind() == io::ErrorKind::AlreadyExists {
+            return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 "binloom.toml already exists; project is already initialized",
-            ),
-        ),
-        Err(error) => Err(error),
+            ));
+        }
+
+        return Err(error);
     }
 
+    println!("Created binloom.toml");
+
+    if add_to_gitignore(Path::new(".gitignore"))? {
+        println!("Added .tools/ to .gitignore");
+    }
+
+    Ok(())
 }
 
 fn generate_manifest(path: &Path) -> io::Result<()> {
@@ -30,21 +34,39 @@ fn generate_manifest(path: &Path) -> io::Result<()> {
 [binloom]
 version = "{}"
 "#,
-        env!("CARGO_PKG_VERSION"));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)?;
+        env!("CARGO_PKG_VERSION")
+    );
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
 
     file.write_all(manifest.as_bytes())
 }
-fn add_to_gitignore() {}
+fn add_to_gitignore(path: &Path) -> io::Result<bool> {
+    let existing = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error),
+    };
+
+    if existing.lines().any(|line| line.trim() == ".tools/") {
+        return Ok(false);
+    }
+
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+
+    if !existing.is_empty() && !existing.ends_with('\n') {
+        writeln!(file)?;
+    }
+
+    writeln!(file, ".tools/")?;
+
+    Ok(true)
+}
 fn generate_binloomw() {}
 
 #[cfg(test)]
 mod tests {
+    use crate::init::{add_to_gitignore, generate_manifest};
     use std::{fs, io};
-    use crate::init::generate_manifest;
 
     #[test]
     fn generates_manifest_without_overwriting_it() {
@@ -68,5 +90,25 @@ version = "{}"
 
         assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(fs::read_to_string(path).unwrap(), expected);
+    }
+
+    #[test]
+    fn adds_tools_to_gitignore_once_without_replacing_content() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(".gitignore");
+
+        fs::write(&path, "target/\n.env").unwrap();
+
+        assert!(add_to_gitignore(&path).unwrap());
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "target/\n.env\n.tools/\n"
+        );
+
+        assert!(!add_to_gitignore(&path).unwrap());
+        assert_eq!(
+            fs::read_to_string(path).unwrap(),
+            "target/\n.env\n.tools/\n"
+        );
     }
 }
