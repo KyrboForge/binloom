@@ -1,4 +1,6 @@
 mod init;
+mod list;
+mod manifest;
 
 use clap::{Parser, Subcommand};
 use std::process::ExitCode;
@@ -37,10 +39,7 @@ fn main() -> ExitCode {
             println!("Executing...");
             Ok(())
         }
-        Command::List => {
-            println!("Listing...");
-            Ok(())
-        }
+        Command::List => list::list(),
         Command::Path => {
             println!("Showing path...");
             Ok(())

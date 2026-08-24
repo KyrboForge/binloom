@@ -1,26 +1,26 @@
+use anyhow::{Context, Result, bail};
 use std::{
     fs::{self, OpenOptions},
     io::{self, Write},
     path::Path,
 };
 
-pub fn init() -> io::Result<()> {
+pub fn init() -> Result<()> {
     println!("Initializing Binloom...");
 
-    if let Err(error) = generate_manifest(Path::new("binloom.toml")) {
-        if error.kind() == io::ErrorKind::AlreadyExists {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "binloom.toml already exists; project is already initialized",
-            ));
+    match generate_manifest(Path::new("binloom.toml")) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            bail!("binloom.toml already exists; project is already initialized");
         }
-
-        return Err(error);
+        Err(error) => {
+            return Err(error).context("failed to create binloom.toml");
+        }
     }
 
     println!("Created binloom.toml");
 
-    if add_to_gitignore(Path::new(".gitignore"))? {
+    if add_to_gitignore(Path::new(".gitignore")).context("failed to update .gitignore")? {
         println!("Added .tools/ to .gitignore");
     }
 
@@ -61,7 +61,6 @@ fn add_to_gitignore(path: &Path) -> io::Result<bool> {
 
     Ok(true)
 }
-fn generate_binloomw() {}
 
 #[cfg(test)]
 mod tests {
