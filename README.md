@@ -55,10 +55,11 @@ Planned explicit updates:
 ```sh
 ./binloomw update
 ./binloomw update lefthook
-./binloomw update binloom
+./binloomw update --self
 ```
 
-Updates modify the lockfile. Installs do not.
+Updates modify `binloom.toml` and `binloom.lock`. A full update includes Binloom.
+Installs do not modify either file.
 
 ## Repository files
 

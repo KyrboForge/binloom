@@ -3,13 +3,21 @@ use std::path::Path;
 
 use crate::lockfile::{ArtifactFormat, LockedArtifact, LockedTool, Lockfile};
 use crate::manifest::{GithubSource, Tool};
-use crate::{download, manifest::Manifest, platform::Platform, sources::github};
-use anyhow::{Context, Result, bail, ensure};
+use crate::{download, manifest, manifest::Manifest, platform::Platform, sources::github};
+use anyhow::{Context, Result, bail};
 use reqwest::blocking::Client;
 use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime};
 
 pub fn update(tool_name: Option<&str>) -> Result<()> {
+    update_tools(tool_name, true)
+}
+
+pub fn lock() -> Result<()> {
+    update_tools(None, false)
+}
+
+fn update_tools(tool_name: Option<&str>, latest: bool) -> Result<()> {
     let manifest = Manifest::try_from(Path::new("binloom.toml"))?;
 
     let minimum_age = manifest.update.minimum_release_age_minutes;
@@ -28,8 +36,6 @@ pub fn update(tool_name: Option<&str>) -> Result<()> {
             (vec![(name, tool)], lockfile)
         }
         None => {
-            ensure!(!manifest.tools.is_empty(), "no tools configured");
-
             let selected = manifest
                 .tools
                 .iter()
@@ -50,18 +56,52 @@ pub fn update(tool_name: Option<&str>) -> Result<()> {
     };
 
     let client = download::client()?;
+    let mut versions = BTreeMap::new();
 
     for (name, tool) in selected {
-        let locked = resolve_tool(name, &tool.version, &tool.source, minimum_age, &client)?;
+        let locked = if latest {
+            resolve_latest_tool(name, &tool.source, minimum_age, &client)?
+        } else {
+            resolve_tool(name, &tool.version, &tool.source, minimum_age, &client)?
+        };
 
+        versions.insert(name.to_owned(), locked.version.clone());
         lockfile.tools.insert(name.to_owned(), locked);
     }
 
+    let binloom_version = if latest && tool_name.is_none() {
+        let locked = resolve_latest_tool("binloom", &binloom_source(), minimum_age, &client)?;
+        let version = locked.version.clone();
+        lockfile.binloom = Some(locked);
+        Some(version)
+    } else {
+        None
+    };
+
+    if latest {
+        manifest::update_versions(
+            Path::new("binloom.toml"),
+            binloom_version.as_deref(),
+            versions
+                .iter()
+                .map(|(name, version)| (name.as_str(), version.as_str())),
+        )?;
+    }
     lockfile.write(lock_path)?;
 
     println!("Updated {}", lock_path.display());
 
     Ok(())
+}
+
+fn resolve_latest_tool(
+    name: &str,
+    source: &GithubSource,
+    minimum_age_minutes: u64,
+    client: &Client,
+) -> Result<LockedTool> {
+    let release = github::fetch_latest_release(client, source)?;
+    resolve_release(name, source, release, minimum_age_minutes, client)
 }
 
 fn resolve_tool(
@@ -72,6 +112,16 @@ fn resolve_tool(
     client: &Client,
 ) -> Result<LockedTool> {
     let release = github::fetch_release(client, source, version)?;
+    resolve_release(name, source, release, minimum_age_minutes, client)
+}
+
+fn resolve_release(
+    name: &str,
+    source: &GithubSource,
+    release: github::Release,
+    minimum_age_minutes: u64,
+    client: &Client,
+) -> Result<LockedTool> {
     println!("Found {} for {name}:", release.tag_name);
     ensure_minimum_release_age(&release, minimum_age_minutes, OffsetDateTime::now_utc())?;
 
@@ -94,7 +144,11 @@ fn resolve_tool(
     }
 
     Ok(LockedTool {
-        version: version.to_string(),
+        version: release
+            .tag_name
+            .strip_prefix('v')
+            .unwrap_or(&release.tag_name)
+            .to_owned(),
         source: source.to_string(),
         tag: release.tag_name,
         artifacts,
@@ -146,16 +200,12 @@ pub fn update_binloom() -> Result<()> {
     let manifest = Manifest::try_from(Path::new("binloom.toml"))?;
     let lock_path = Path::new("binloom.lock");
 
-    let source = GithubSource {
-        owner: "KyrboForge".to_owned(),
-        repository: "binloom".to_owned(),
-    };
+    let source = binloom_source();
 
     let client = download::client()?;
 
-    let locked = resolve_tool(
+    let locked = resolve_latest_tool(
         "binloom",
-        &manifest.binloom.version,
         &source,
         manifest.update.minimum_release_age_minutes,
         &client,
@@ -170,12 +220,25 @@ pub fn update_binloom() -> Result<()> {
         Lockfile::default()
     };
 
+    let version = locked.version.clone();
     lockfile.binloom = Some(locked);
+    manifest::update_versions(
+        lock_path.with_file_name("binloom.toml").as_path(),
+        Some(&version),
+        [],
+    )?;
     lockfile.write(lock_path)?;
 
     println!("Updated Binloom in {}", lock_path.display());
 
     Ok(())
+}
+
+fn binloom_source() -> GithubSource {
+    GithubSource {
+        owner: "KyrboForge".to_owned(),
+        repository: "binloom".to_owned(),
+    }
 }
 
 #[cfg(test)]

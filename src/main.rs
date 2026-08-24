@@ -28,9 +28,9 @@ enum Command {
     Init,
     #[command(about = "Install the tools")]
     Install,
-    #[command(about = "Update the tools")]
+    #[command(about = "Update tools and Binloom")]
     Update {
-        /// Tool to update; omit to update all tools
+        /// Tool to update; omit to update all tools and Binloom
         tool: Option<String>,
 
         /// Update the locked Binloom binary

@@ -58,6 +58,26 @@ pub fn fetch_release(client: &Client, source: &GithubSource, version: &str) -> R
     )
 }
 
+pub fn fetch_latest_release(client: &Client, source: &GithubSource) -> Result<Release> {
+    let url = format!(
+        "https://api.github.com/repos/{}/{}/releases/latest",
+        source.owner, source.repository
+    );
+    let mut request = client.get(&url);
+
+    if let Ok(token) = std::env::var("GITHUB_TOKEN").or_else(|_| std::env::var("GH_TOKEN")) {
+        request = request.bearer_auth(token);
+    }
+
+    request
+        .send()
+        .context("failed to fetch latest GitHub release")?
+        .error_for_status()
+        .context("GitHub rejected latest release request")?
+        .json()
+        .context("failed to parse latest GitHub release")
+}
+
 pub fn find_asset<'a>(
     release: &'a Release,
     tool_name: &str,

@@ -116,6 +116,7 @@ and its lockfile version are updated together.
 binloom init
 binloom install
 binloom update [tool]
+binloom update --self
 binloom exec <tool> -- <args...>
 binloom list
 binloom path <tool>
@@ -125,15 +126,15 @@ Behavior:
 
 - `init` creates missing project files and refuses to overwrite edited files.
 - `install` requires a present, compatible lockfile and never modifies it.
-- `update` resolves release assets and checksums, then atomically replaces the
-  lockfile.
+- `update` selects the latest stable releases, updates the manifest versions,
+  resolves assets and checksums, then replaces the lockfile. Without a tool
+  name it also updates Binloom.
 - `exec` installs the selected tool when missing, then executes its versioned
   binary directly.
 - `list` reports locked and installed versions.
 - `path` prints the exact installed executable path.
 
-`update binloom` updates the requested Binloom version and locked bootstrap
-assets. Self-update is explicit, never automatic.
+`update --self` updates only Binloom and its locked bootstrap assets.
 
 ## Installation layout
 

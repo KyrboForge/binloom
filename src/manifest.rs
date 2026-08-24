@@ -6,6 +6,7 @@ use std::{
     fs,
     path::Path,
 };
+use toml_edit::{DocumentMut, Item, Value};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -92,6 +93,42 @@ impl Display for GithubSource {
         write!(formatter, "github:{}/{}", self.owner, self.repository)
     }
 }
+
+pub fn update_versions<'a>(
+    path: &Path,
+    binloom: Option<&str>,
+    tools: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> Result<()> {
+    let content =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let mut document = content
+        .parse::<DocumentMut>()
+        .with_context(|| format!("failed to edit {}", path.display()))?;
+
+    if let Some(version) = binloom {
+        set_version(&mut document["binloom"]["version"], version)?;
+    }
+    for (name, version) in tools {
+        set_version(&mut document["tools"][name]["version"], version)?;
+    }
+
+    fs::write(path, document.to_string())
+        .with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn set_version(item: &mut Item, version: &str) -> Result<()> {
+    let value = item
+        .as_value_mut()
+        .context("manifest version must be a string")?;
+    if !matches!(value, Value::String(_)) {
+        bail!("manifest version must be a string");
+    }
+
+    let decor = value.decor().clone();
+    *value = Value::from(version);
+    *value.decor_mut() = decor;
+    Ok(())
+}
 #[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct UpdateConfig {
@@ -175,5 +212,33 @@ version = "0.1.0"
             source.unwrap_err(),
             "source must use github:owner/repository"
         );
+    }
+
+    #[test]
+    fn updates_versions_without_losing_comments() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("binloom.toml");
+
+        fs::write(
+            &path,
+            r#"# project tools
+manifest-version = 1
+
+[binloom]
+version = "0.1.0" # wrapper
+
+[tools.lefthook]
+version = "2.1.10" # hooks
+source = "github:evilmartians/lefthook"
+"#,
+        )
+        .unwrap();
+
+        update_versions(&path, Some("0.1.1"), [("lefthook", "2.1.11")]).unwrap();
+
+        let content = fs::read_to_string(path).unwrap();
+        assert!(content.contains("# project tools"));
+        assert!(content.contains("version = \"0.1.1\" # wrapper"));
+        assert!(content.contains("version = \"2.1.11\" # hooks"));
     }
 }

@@ -17,24 +17,6 @@ fn run_update(manifest: &str, arguments: &[&str]) -> Output {
 }
 
 #[test]
-fn update_all_rejects_empty_manifest() {
-    let output = run_update(
-        r#"manifest-version = 1
-
-[binloom]
-version = "0.1.0"
-"#,
-        &[],
-    );
-
-    assert!(!output.status.success());
-    assert_eq!(
-        String::from_utf8(output.stderr).unwrap(),
-        "error: no tools configured\n"
-    );
-}
-
-#[test]
 fn update_rejects_unknown_tool() {
     let output = run_update(
         r#"manifest-version = 1
