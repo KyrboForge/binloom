@@ -1,7 +1,11 @@
-use std::{collections::BTreeMap, fs, path::Path};
-
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
+use std::{
+    collections::BTreeMap,
+    fmt::{self, Display, Formatter},
+    fs,
+    path::Path,
+};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -25,7 +29,7 @@ pub struct Binloom {
 #[serde(deny_unknown_fields)]
 pub struct Tool {
     pub version: String,
-    pub source: String,
+    pub source: GithubSource,
     pub asset: Option<String>,
 }
 
@@ -43,6 +47,46 @@ impl TryFrom<&Path> for Manifest {
             bail!("unsupported manifest version: {}", manifest.version);
         }
         Ok(manifest)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(try_from = "String")]
+pub struct GithubSource {
+    pub owner: String,
+    pub repository: String,
+}
+
+impl TryFrom<String> for GithubSource {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        let source = value
+            .strip_prefix("github:")
+            .ok_or_else(|| "source must use github:owner/repository".to_owned())?;
+
+        let (owner, repository) = source
+            .split_once('/')
+            .ok_or_else(|| "source must use github:owner/repository".to_owned())?;
+
+        if owner.is_empty()
+            || repository.is_empty()
+            || repository.contains('/')
+            || value.chars().any(char::is_whitespace)
+        {
+            return Err("source must use github:owner/repository".to_owned());
+        }
+
+        Ok(Self {
+            owner: owner.to_owned(),
+            repository: repository.to_owned(),
+        })
+    }
+}
+
+impl Display for GithubSource {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        write!(formatter, "github:{}/{}", self.owner, self.repository)
     }
 }
 
@@ -79,7 +123,7 @@ asset = "lefthook_{version}_{os}_{arch}.gz"
         let lefthook = &manifest.tools["lefthook"];
 
         assert_eq!(lefthook.version, "2.1.10");
-        assert_eq!(lefthook.source, "github:evilmartians/lefthook");
+        assert_eq!(lefthook.source.to_string(), "github:evilmartians/lefthook");
         assert_eq!(
             lefthook.asset.as_deref(),
             Some("lefthook_{version}_{os}_{arch}.gz")
@@ -104,5 +148,15 @@ version = "0.1.0"
         let error = Manifest::try_from(path.as_path()).unwrap_err();
 
         assert_eq!(error.to_string(), "unsupported manifest version: 2");
+    }
+
+    #[test]
+    fn rejects_invalid_source() {
+        let source = GithubSource::try_from("https://github.com/owner/repo".to_owned());
+
+        assert_eq!(
+            source.unwrap_err(),
+            "source must use github:owner/repository"
+        );
     }
 }
