@@ -1,0 +1,17 @@
+[package]
+name = "binloom"
+version = "0.1.0"
+edition = "2024"
+authors = ["Kacper 'Obryko' Obrycki <kacperobrycki@gmail.com>"]
+description = "Repository-local manager for pinned developer tools"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Obryko/binloom"
+readme = "README.md"
+keywords = ["toolchain", "developer-tools", "reproducible", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+clap = {version = "4.0", features = ["derive"]}
+
+[dev-dependencies]
+tempfile = { version = "3.27.0" }
