@@ -69,15 +69,21 @@ fn update_tools(tool_name: Option<&str>, latest: bool) -> Result<()> {
         lockfile.tools.insert(name.to_owned(), locked);
     }
 
-    let binloom_version = if latest && tool_name.is_none() {
-        let (locked, wrapper) = resolve_latest_binloom(&binloom_source(), minimum_age, &client)?;
+    let binloom_version = if tool_name.is_none() {
+        let source = binloom_source();
+
+        let (locked, wrapper) = if latest {
+            resolve_latest_binloom(&source, minimum_age, &client)?
+        } else {
+            resolve_binloom_version(&source, &manifest.binloom.version, minimum_age, &client)?
+        };
 
         let version = locked.version.clone();
 
         lockfile.binloom = Some(locked);
         lockfile.wrapper = Some(wrapper);
 
-        Some(version)
+        latest.then_some(version)
     } else {
         None
     };
@@ -174,18 +180,18 @@ fn resolve_latest_binloom(
 ) -> Result<(LockedTool, LockedWrapper)> {
     let release = github::fetch_latest_release(client, source)?;
 
-    let binloom = resolve_release("binloom", source, &release, minimum_age_minutes, client)?;
+    resolve_binloom_release(source, &release, minimum_age_minutes, client)
+}
 
-    let asset = github::find_asset_by_name(&release, "binloomw")?;
-    let sha256 = resolve_checksum(client, &release, asset)?;
+fn resolve_binloom_version(
+    source: &GithubSource,
+    version: &str,
+    minimum_age_minutes: u64,
+    client: &Client,
+) -> Result<(LockedTool, LockedWrapper)> {
+    let release = github::fetch_release(client, source, version)?;
 
-    let wrapper = LockedWrapper {
-        version: binloom.version.clone(),
-        url: asset.browser_download_url.clone(),
-        sha256,
-    };
-
-    Ok((binloom, wrapper))
+    resolve_binloom_release(source, &release, minimum_age_minutes, client)
 }
 
 fn ensure_minimum_release_age(
@@ -277,6 +283,26 @@ fn binloom_source() -> GithubSource {
         owner: "KyrboForge".to_owned(),
         repository: "binloom".to_owned(),
     }
+}
+
+fn resolve_binloom_release(
+    source: &GithubSource,
+    release: &github::Release,
+    minimum_age_minutes: u64,
+    client: &Client,
+) -> Result<(LockedTool, LockedWrapper)> {
+    let binloom = resolve_release("binloom", source, release, minimum_age_minutes, client)?;
+
+    let asset = github::find_asset_by_name(release, "binloomw")?;
+    let sha256 = resolve_checksum(client, release, asset)?;
+
+    let wrapper = LockedWrapper {
+        version: binloom.version.clone(),
+        url: asset.browser_download_url.clone(),
+        sha256,
+    };
+
+    Ok((binloom, wrapper))
 }
 
 #[cfg(test)]
