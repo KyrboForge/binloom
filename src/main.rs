@@ -1,4 +1,5 @@
 mod add;
+mod common;
 mod download;
 mod exec;
 mod init;

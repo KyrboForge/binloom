@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/KyrboForge/binloom/main/schemas/binloom.schema.json",
+  "title": "Binloom manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["manifest-version", "binloom"],
+  "properties": {
+    "manifest-version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Binloom manifest format version."
+    },
+    "binloom": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version"],
+      "properties": {
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Pinned Binloom version."
+        }
+      }
+    },
+    "update": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "minimum-release-age-minutes": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 1440,
+          "description": "Minimum release age in minutes."
+        }
+      }
+    },
+    "tools": {
+      "type": "object",
+      "description": "Repository-local developer tools.",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["version", "source"],
+        "properties": {
+          "version": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source": {
+            "type": "string",
+            "pattern": "^github:[^/\\\\s]+/[^/\\\\s]+$",
+            "description": "GitHub source in github:owner/repository format."
+          },
+          "asset": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Optional release asset pattern."
+          }
+        }
+      }
+    }
+  }
+}
