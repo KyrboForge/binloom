@@ -38,7 +38,7 @@ fn copy_and_sha256(
     max_bytes: u64,
 ) -> io::Result<String> {
     let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
+    let mut buffer = [0_u8; 16 * 1024];
     let mut total = 0_u64;
 
     loop {
