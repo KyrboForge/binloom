@@ -1,3 +1,4 @@
+use crate::common::warn;
 use crate::download;
 use crate::platform::Platform;
 use anyhow::{Context, bail};
@@ -95,25 +96,35 @@ impl Release {
             .collect::<Vec<_>>();
 
         let matches = if gzip_matches.len() == 1 {
+            Self::warn_dropped(&matches, &gzip_matches, "the only gzip candidate");
             gzip_matches
         } else {
             matches
         };
-        let matches = Self::prefer(matches, |asset| {
-            asset
-                .name
-                .to_ascii_lowercase()
-                .contains(platform.os_aliases()[0])
-        });
 
-        let matches = Self::prefer(matches, |asset| {
-            asset
-                .name
-                .to_ascii_lowercase()
-                .contains(platform.arch_aliases()[0])
-        });
+        let matches = Self::prefer(
+            matches,
+            &format!("OS alias {}", platform.os_aliases()[0]),
+            |asset| {
+                asset
+                    .name
+                    .to_ascii_lowercase()
+                    .contains(platform.os_aliases()[0])
+            },
+        );
 
-        let matches = Self::prefer(matches, |asset| {
+        let matches = Self::prefer(
+            matches,
+            &format!("architecture alias {}", platform.arch_aliases()[0]),
+            |asset| {
+                asset
+                    .name
+                    .to_ascii_lowercase()
+                    .contains(platform.arch_aliases()[0])
+            },
+        );
+
+        let matches = Self::prefer(matches, "gzip format", |asset| {
             asset.name.to_ascii_lowercase().ends_with(".gz")
         });
 
@@ -219,21 +230,45 @@ impl Release {
 
         None
     }
-    fn prefer(
-        assets: Vec<&ReleaseAsset>,
+    fn prefer<'a>(
+        assets: Vec<&'a ReleaseAsset>,
+        reason: &str,
         predicate: impl Fn(&ReleaseAsset) -> bool,
-    ) -> Vec<&ReleaseAsset> {
+    ) -> Vec<&'a ReleaseAsset> {
         let preferred = assets
             .iter()
             .copied()
             .filter(|asset| predicate(asset))
             .collect::<Vec<_>>();
 
+        Self::warn_dropped(&assets, &preferred, reason);
+
         if preferred.is_empty() {
             assets
         } else {
             preferred
         }
+    }
+
+    fn warn_dropped(assets: &[&ReleaseAsset], preferred: &[&ReleaseAsset], reason: &str) {
+        if preferred.is_empty() || preferred.len() == assets.len() {
+            return;
+        }
+
+        let dropped = assets
+            .iter()
+            .filter(|asset| {
+                !preferred
+                    .iter()
+                    .any(|candidate| candidate.name == asset.name)
+            })
+            .map(|asset| asset.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        warn(&format!(
+            "asset selection preferred {reason}; dropped: {dropped}"
+        ));
     }
 }
 

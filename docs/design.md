@@ -68,10 +68,14 @@ source = "github:evilmartians/lefthook"
 The schema comment enables validation in editors that support TOML schemas.
 Binloom preserves comments while changing versions.
 
-During resolution, Binloom matches release assets using the tool name and
-case-insensitive platform aliases. Resolution must produce exactly one asset
-for every supported platform. Zero or multiple matches fail before replacing
-the lockfile.
+During automatic resolution, Binloom matches release assets using the tool
+name and case-insensitive platform aliases. It may prefer gzip assets and
+canonical platform aliases; whenever candidates are discarded, Binloom emits
+a warning naming them. Zero or multiple candidates remaining after these
+preferences fail before replacing the lockfile.
+
+An explicit `asset` pattern bypasses automatic matching and must resolve to
+exactly one asset for every supported platform.
 
 An optional asset pattern can narrow an ambiguous release:
 
