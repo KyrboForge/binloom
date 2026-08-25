@@ -16,8 +16,8 @@ use crate::{
 
 pub fn add(name: &str, source: &str, version: &str, asset: Option<&str>) -> Result<()> {
     write_tool(Path::new("binloom.toml"), name, source, version, asset)?;
-    update::lock().context("tool was added to binloom.toml, but lockfile update failed")?;
-
+    update::lock_added_tool(name)
+        .context("tool was added to binloom.toml, but lockfile update failed")?;
     install::install()
 }
 

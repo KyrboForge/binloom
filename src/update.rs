@@ -18,8 +18,21 @@ pub fn update(tool_name: Option<&str>) -> Result<()> {
     update_tools(tool_name, true)
 }
 
-pub fn lock() -> Result<()> {
-    update_tools(None, false)
+pub fn lock_added_tool(tool_name: &str) -> Result<()> {
+    let lock_path = Path::new("binloom.lock");
+
+    let existing = if lock_path
+        .try_exists()
+        .context("failed to check binloom.lock")?
+    {
+        Some(Lockfile::try_from(lock_path)?)
+    } else {
+        None
+    };
+
+    let target = lock_target(existing.as_ref(), tool_name);
+
+    update_tools(target, false)
 }
 
 fn update_tools(tool_name: Option<&str>, latest: bool) -> Result<()> {
@@ -326,6 +339,12 @@ pub fn update_binloom() -> Result<()> {
     Ok(())
 }
 
+fn lock_target<'a>(existing: Option<&Lockfile>, tool_name: &'a str) -> Option<&'a str> {
+    existing
+        .is_some_and(|lockfile| lockfile.binloom.is_some() && lockfile.wrapper.is_some())
+        .then_some(tool_name)
+}
+
 fn binloom_source() -> Source {
     Source::try_from("github:KyrboForge/binloom".to_owned())
         .expect("hardcoded Binloom source must be valid")
@@ -400,6 +419,10 @@ mod tests {
             }),
             ..Lockfile::default()
         };
+
+        assert_eq!(lock_target(Some(&existing), "lefthook"), Some("lefthook"));
+        assert_eq!(lock_target(None, "lefthook"), None);
+        assert_eq!(lock_target(Some(&Lockfile::default()), "lefthook"), None);
 
         let fresh = fresh_lockfile(Some(existing));
 
