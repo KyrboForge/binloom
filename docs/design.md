@@ -135,6 +135,12 @@ Tool entries use the same `artifacts.<platform>` shape under
 - `download` — checksum computed by Binloom from the downloaded bytes,
 - `unknown` — legacy lockfile created before provenance was recorded.
 
+When neither release metadata nor a checksum sidecar provides a checksum,
+locking downloads and hashes the artifact for every supported platform. This
+can be bandwidth-heavy: up to four complete artifacts are downloaded, and a
+following install downloads the current platform artifact again. Upstreams
+that publish SHA-256 digests or checksum files avoid these locking downloads.
+
 ## Commands and mutation rules
 
 ```text
