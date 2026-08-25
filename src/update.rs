@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, path::Path};
 
 use crate::{
-    common::{validate_version, warn},
+    common::{LOCKFILE, MANIFEST, project_root, validate_version, warn},
     download,
     lockfile::{
         ArtifactFormat, ChecksumSource, LockedArtifact, LockedTool, LockedWrapper, Lockfile,
@@ -13,33 +13,36 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use reqwest::blocking::Client;
 use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
-
 pub fn update(tool_name: Option<&str>) -> Result<()> {
-    update_tools(tool_name, true)
+    let root = project_root()?;
+
+    update_tools(&root, tool_name, true)
 }
 
 pub fn lock_added_tool(tool_name: &str) -> Result<()> {
-    let lock_path = Path::new("binloom.lock");
+    let root = project_root()?;
+    let lock_path = root.join(LOCKFILE);
 
     let existing = if lock_path
         .try_exists()
         .context("failed to check binloom.lock")?
     {
-        Some(Lockfile::try_from(lock_path)?)
+        Some(Lockfile::try_from(lock_path.as_path())?)
     } else {
         None
     };
 
     let target = lock_target(existing.as_ref(), tool_name);
 
-    update_tools(target, false)
+    update_tools(&root, target, false)
 }
 
-fn update_tools(tool_name: Option<&str>, latest: bool) -> Result<()> {
-    let manifest = Manifest::try_from(Path::new("binloom.toml"))?;
+fn update_tools(root: &Path, tool_name: Option<&str>, latest: bool) -> Result<()> {
+    let manifest_path = root.join(MANIFEST);
+    let lock_path = root.join(LOCKFILE);
+    let manifest = Manifest::try_from(manifest_path.as_path())?;
 
     let minimum_age = manifest.update.minimum_release_age_minutes;
-    let lock_path = Path::new("binloom.lock");
 
     let (selected, mut lockfile): (Vec<(&str, &Tool)>, Lockfile) = match tool_name {
         Some(name) => {
@@ -48,7 +51,7 @@ fn update_tools(tool_name: Option<&str>, latest: bool) -> Result<()> {
                 .get(name)
                 .with_context(|| format!("tool {name} is not configured"))?;
 
-            let lockfile = Lockfile::try_from(lock_path)
+            let lockfile = Lockfile::try_from(lock_path.as_path())
                 .context("failed to load binloom.lock; run `binloom update` first")?;
 
             (vec![(name, tool)], lockfile)
@@ -64,7 +67,7 @@ fn update_tools(tool_name: Option<&str>, latest: bool) -> Result<()> {
                 .try_exists()
                 .context("failed to check binloom.lock")?
             {
-                Some(Lockfile::try_from(lock_path)?)
+                Some(Lockfile::try_from(lock_path.as_path())?)
             } else {
                 None
             };
@@ -106,11 +109,11 @@ fn update_tools(tool_name: Option<&str>, latest: bool) -> Result<()> {
         None
     };
 
-    lockfile.write(lock_path)?;
+    lockfile.write(lock_path.as_path())?;
 
     if latest {
         manifest::update_versions(
-            Path::new("binloom.toml"),
+            manifest_path.as_path(),
             binloom_version.as_deref(),
             versions
                 .iter()
@@ -301,8 +304,10 @@ fn fresh_lockfile(existing: Option<Lockfile>) -> Lockfile {
 }
 
 pub fn update_binloom() -> Result<()> {
-    let manifest = Manifest::try_from(Path::new("binloom.toml"))?;
-    let lock_path = Path::new("binloom.lock");
+    let root = project_root()?;
+    let manifest_path = root.join(MANIFEST);
+    let lock_path = root.join(LOCKFILE);
+    let manifest = Manifest::try_from(manifest_path.as_path())?;
 
     let source = binloom_source();
 
@@ -318,7 +323,7 @@ pub fn update_binloom() -> Result<()> {
         .try_exists()
         .context("failed to check binloom.lock")?
     {
-        Lockfile::try_from(lock_path)?
+        Lockfile::try_from(lock_path.as_path())?
     } else {
         Lockfile::default()
     };
@@ -326,13 +331,9 @@ pub fn update_binloom() -> Result<()> {
     let version = locked.version.clone();
     lockfile.binloom = Some(locked);
     lockfile.wrapper = Some(wrapper);
-    lockfile.write(lock_path)?;
+    lockfile.write(lock_path.as_path())?;
 
-    manifest::update_versions(
-        lock_path.with_file_name("binloom.toml").as_path(),
-        Some(&version),
-        [],
-    )?;
+    manifest::update_versions(manifest_path.as_path(), Some(&version), [])?;
 
     println!("Updated Binloom in {}", lock_path.display());
 

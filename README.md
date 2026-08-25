@@ -165,6 +165,9 @@ minimum-release-age-minutes = 1440
 | `binloom list` | List configured tools and versions |
 | `binloom path` | Print the absolute `.tools/.bin` path |
 
+Except for `init`, commands find the nearest parent directory containing
+`binloom.toml`, so they also work from project subdirectories.
+
 Updates modify `binloom.toml` and `binloom.lock`. Commit both so contributors
 and CI receive the same toolchain.
 

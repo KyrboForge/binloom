@@ -7,7 +7,7 @@ use std::{
 use anyhow::{Context, Result, ensure};
 
 use crate::{
-    common::{validate_tool_name, validate_version},
+    common::{MANIFEST, project_root, validate_tool_name, validate_version},
     install,
     manifest::Manifest,
     sources::Source,
@@ -15,7 +15,10 @@ use crate::{
 };
 
 pub fn add(name: &str, source: &str, version: &str, asset: Option<&str>) -> Result<()> {
-    write_tool(Path::new("binloom.toml"), name, source, version, asset)?;
+    let root = project_root()?;
+    let manifest_path = root.join(MANIFEST);
+
+    write_tool(manifest_path.as_path(), name, source, version, asset)?;
     update::lock_added_tool(name)
         .context("tool was added to binloom.toml, but lockfile update failed")?;
     install::install()

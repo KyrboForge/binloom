@@ -1,11 +1,8 @@
-use std::env;
-
-use anyhow::{Context, Result};
+use crate::common::{TOOLS_DIR, project_root};
+use anyhow::Result;
 
 pub fn path() -> Result<()> {
-    let path = env::current_dir()
-        .context("failed to determine current directory")?
-        .join(".tools/.bin");
+    let path = project_root()?.join(TOOLS_DIR).join(".bin");
 
     println!("{}", path.display());
 

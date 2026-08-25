@@ -1,9 +1,16 @@
-use std::process::Command;
+use std::{fs, process::Command};
 
 #[cfg(unix)]
 #[test]
-fn prepends_local_tools_to_path_and_preserves_exit_code() {
+fn prepends_project_tools_to_path_and_preserves_exit_code() {
     let directory = tempfile::tempdir().unwrap();
+    let nested = directory.path().join("src/nested");
+    let expected_bin = fs::canonicalize(directory.path())
+        .unwrap()
+        .join(".tools/.bin");
+
+    fs::create_dir_all(&nested).unwrap();
+    fs::write(directory.path().join("binloom.toml"), "").unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_binloom"))
         .args([
@@ -11,9 +18,10 @@ fn prepends_local_tools_to_path_and_preserves_exit_code() {
             "--",
             "sh",
             "-c",
-            r#"if [ "${PATH%%:*}" = "$PWD/.tools/.bin" ]; then exit 42; else exit 7; fi"#,
+            r#"if [ "${PATH%%:*}" = "$EXPECTED_BIN" ]; then exit 42; else exit 7; fi"#,
         ])
-        .current_dir(directory.path())
+        .env("EXPECTED_BIN", &expected_bin)
+        .current_dir(&nested)
         .output()
         .unwrap();
 

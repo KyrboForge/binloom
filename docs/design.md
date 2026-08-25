@@ -169,6 +169,10 @@ binloom path
 - `list` reports configured versions and sources.
 - `path` prints the absolute `.tools/.bin` path.
 
+Except for `init`, commands find the nearest ancestor containing
+`binloom.toml` and resolve the lockfile and `.tools` directory from that project
+root. `init` always operates in the current directory.
+
 `add`, an install without a lockfile, and updates write repository
 configuration or lock state. Those changes are reviewed and committed like
 dependency updates.

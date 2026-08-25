@@ -1,3 +1,4 @@
+use crate::common::{TOOLS_DIR, project_root};
 use std::{env, ffi::OsString, process::Command};
 
 use anyhow::{Context, Result};
@@ -10,11 +11,7 @@ pub fn exec(arguments: &[OsString]) -> Result<()> {
         .split_first()
         .context("missing command to execute")?;
 
-    let mut paths = vec![
-        env::current_dir()
-            .context("failed to determine current directory")?
-            .join(".tools/.bin"),
-    ];
+    let mut paths = vec![project_root()?.join(TOOLS_DIR).join(".bin")];
 
     if let Some(existing) = env::var_os("PATH") {
         paths.extend(env::split_paths(&existing));

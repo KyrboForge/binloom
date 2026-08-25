@@ -1,4 +1,5 @@
 use crate::{
+    common::{LOCKFILE, MANIFEST, TOOLS_DIR, project_root},
     download,
     lockfile::{ArtifactFormat, Lockfile},
     manifest::Manifest,
@@ -14,8 +15,8 @@ use std::{
 };
 
 pub fn install() -> Result<()> {
-    let root = Path::new(".");
-    let lock_path = root.join("binloom.lock");
+    let root = project_root()?;
+    let lock_path = root.join(LOCKFILE);
 
     if !lock_path
         .try_exists()
@@ -26,12 +27,12 @@ pub fn install() -> Result<()> {
 
     let client = download::client()?;
 
-    install_from(root, &client)
+    install_from(&root, &client)
 }
 
 fn install_from(root: &Path, client: &reqwest::blocking::Client) -> Result<()> {
-    let manifest_path = root.join("binloom.toml");
-    let lock_path = root.join("binloom.lock");
+    let manifest_path = root.join(MANIFEST);
+    let lock_path = root.join(LOCKFILE);
 
     let manifest = Manifest::try_from(manifest_path.as_path())?;
     let lockfile = Lockfile::try_from(lock_path.as_path())?;
@@ -48,7 +49,7 @@ fn install_from(root: &Path, client: &reqwest::blocking::Client) -> Result<()> {
             .get(&platform_key)
             .with_context(|| format!("tool {name} has no artifact for {platform}"))?;
 
-        let directory = root.join(".tools").join(name).join(&tool.version);
+        let directory = root.join(TOOLS_DIR).join(name).join(&tool.version);
 
         fs::create_dir_all(&directory)
             .with_context(|| format!("failed to create {}", directory.display()))?;
@@ -155,7 +156,7 @@ fn unpack(
 
 #[cfg(unix)]
 fn link_tool(root: &Path, name: &str, version: &str) -> Result<()> {
-    let bin_directory = root.join(".tools/.bin");
+    let bin_directory = root.join(TOOLS_DIR).join(".bin");
 
     fs::create_dir_all(&bin_directory).context("failed to create .tools/.bin")?;
 

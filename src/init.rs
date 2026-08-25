@@ -9,7 +9,7 @@ use std::{
 
 pub fn init() -> Result<()> {
     println!("Initializing Binloom...");
-    let manifest_path = Path::new("binloom.toml");
+    let manifest_path = Path::new(common::MANIFEST);
     let wrapper_path = Path::new("binloomw");
 
     if manifest_path

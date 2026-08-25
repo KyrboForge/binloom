@@ -1,9 +1,13 @@
-use crate::manifest::Manifest;
+use crate::{
+    common::{MANIFEST, project_root},
+    manifest::Manifest,
+};
 use anyhow::Result;
-use std::path::Path;
 
 pub(crate) fn list() -> Result<()> {
-    let manifest = Manifest::try_from(Path::new("binloom.toml"))?;
+    let root = project_root()?;
+    let manifest_path = root.join(MANIFEST);
+    let manifest = Manifest::try_from(manifest_path.as_path())?;
 
     println!("Binloom {}", manifest.binloom.version);
 
