@@ -5,29 +5,28 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
-use reqwest::blocking::Client;
 use sha2::{Digest, Sha256};
+pub(crate) use ureq::Agent as Client;
 
 const MAX_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
 
-pub fn client() -> Result<Client> {
-    Client::builder()
+pub fn client() -> Client {
+    Client::config_builder()
         .user_agent(concat!("binloom/", env!("CARGO_PKG_VERSION")))
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(10 * 60))
+        .timeout_connect(Some(Duration::from_secs(10)))
+        .timeout_global(Some(Duration::from_secs(10 * 60)))
         .build()
-        .context("failed to create HTTP client")
+        .into()
 }
 
 pub fn sha256_url(client: &Client, url: &str) -> Result<String> {
     let mut response = client
         .get(url)
-        .send()
-        .with_context(|| format!("failed to download {url}"))?
-        .error_for_status()
-        .with_context(|| format!("download failed for {url}"))?;
+        .call()
+        .with_context(|| format!("failed to download {url}"))?;
 
-    sha256(&mut response, MAX_DOWNLOAD_BYTES).with_context(|| format!("failed to hash {url}"))
+    sha256(response.body_mut().as_reader(), MAX_DOWNLOAD_BYTES)
+        .with_context(|| format!("failed to hash {url}"))
 }
 fn sha256(reader: impl Read, max_bytes: u64) -> io::Result<String> {
     copy_and_sha256(reader, io::sink(), max_bytes)
@@ -74,16 +73,16 @@ fn copy_and_sha256(
 pub fn text_url(client: &Client, url: &str) -> Result<String> {
     const MAX_BYTES: u64 = 1024 * 1024;
 
-    let response = client
+    let mut response = client
         .get(url)
-        .send()
-        .with_context(|| format!("failed to download {url}"))?
-        .error_for_status()
-        .with_context(|| format!("download failed for {url}"))?;
+        .call()
+        .with_context(|| format!("failed to download {url}"))?;
 
     let mut content = String::new();
 
     response
+        .body_mut()
+        .as_reader()
         .take(MAX_BYTES + 1)
         .read_to_string(&mut content)
         .with_context(|| format!("failed to read {url}"))?;
@@ -99,13 +98,15 @@ pub fn text_url(client: &Client, url: &str) -> Result<String> {
 pub fn download_to(client: &Client, url: &str, mut writer: impl io::Write) -> Result<String> {
     let mut response = client
         .get(url)
-        .send()
-        .with_context(|| format!("failed to download {url}"))?
-        .error_for_status()
-        .with_context(|| format!("download failed for {url}"))?;
+        .call()
+        .with_context(|| format!("failed to download {url}"))?;
 
-    copy_and_sha256(&mut response, &mut writer, MAX_DOWNLOAD_BYTES)
-        .with_context(|| format!("failed to store download from {url}"))
+    copy_and_sha256(
+        response.body_mut().as_reader(),
+        &mut writer,
+        MAX_DOWNLOAD_BYTES,
+    )
+    .with_context(|| format!("failed to store download from {url}"))
 }
 
 #[cfg(test)]

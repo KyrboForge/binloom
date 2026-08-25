@@ -1,8 +1,8 @@
 use crate::common::warn;
 use crate::download;
+use crate::download::Client;
 use crate::platform::Platform;
 use anyhow::{Context, bail};
-use reqwest::blocking::Client;
 
 #[derive(Debug)]
 pub struct Release {
@@ -364,7 +364,7 @@ mod tests {
             published_at: None,
             assets: vec![asset("tool_linux_x86_64.gz")],
         };
-        let client = Client::builder().build().unwrap();
+        let client = download::client();
 
         assert_eq!(
             release

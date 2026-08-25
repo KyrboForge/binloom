@@ -22,10 +22,10 @@ anyhow = "1.0.104"
 clap = { version = "4.0", features = ["derive"] }
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.4"
-reqwest = { version = "0.13.4", default-features = false, features = ["blocking","json","rustls"] }
 sha2 = "0.11.0"
 time = { version = "0.3.55", features = ["parsing"] }
 tempfile = { version = "3.27.0" }
 flate2 = "1.1.9"
 toml_edit = { version = "0.25.13", default-features = false, features = ["parse", "display"] }
+ureq = { version = "3.4.0", default-features = false, features = ["rustls", "json"] }
 

@@ -1,5 +1,6 @@
 use std::{collections::BTreeMap, path::Path};
 
+use crate::download::Client;
 use crate::{
     common::{LOCKFILE, MANIFEST, project_root, validate_version, warn},
     download,
@@ -11,7 +12,6 @@ use crate::{
     sources::{Source, release},
 };
 use anyhow::{Context, Result, bail};
-use reqwest::blocking::Client;
 use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 pub fn update(tool_name: Option<&str>) -> Result<()> {
     let root = project_root()?;
@@ -76,7 +76,7 @@ fn update_tools(root: &Path, tool_name: Option<&str>, latest: bool) -> Result<()
         }
     };
 
-    let client = download::client()?;
+    let client = download::client();
     let mut versions = BTreeMap::new();
 
     for (name, tool) in selected {
@@ -311,7 +311,7 @@ pub fn update_binloom() -> Result<()> {
 
     let source = binloom_source();
 
-    let client = download::client()?;
+    let client = download::client();
 
     let (locked, wrapper) = resolve_latest_binloom(
         &source,
@@ -454,7 +454,7 @@ mod tests {
                 sha256: Some(checksum.clone()),
             }],
         };
-        let client = Client::builder().build().unwrap();
+        let client = download::client();
 
         let resolved = resolve_checksum(&client, &release, &release.assets[0]).unwrap();
 
@@ -485,7 +485,7 @@ mod tests {
                 },
             ],
         };
-        let client = Client::builder().build().unwrap();
+        let client = download::client();
 
         let resolved = resolve_checksum(&client, &release, &release.assets[0]).unwrap();
 
@@ -509,7 +509,7 @@ mod tests {
                 sha256: None,
             }],
         };
-        let client = Client::builder().build().unwrap();
+        let client = download::client();
 
         let resolved = resolve_checksum(&client, &release, &release.assets[0]).unwrap();
 

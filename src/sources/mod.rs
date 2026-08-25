@@ -1,6 +1,6 @@
+use crate::download::Client;
 use crate::sources::{github::GithubSource, release::Release};
 use anyhow::Result;
-use reqwest::blocking::Client;
 use serde::Deserialize;
 use std::fmt::{self, Display, Formatter};
 

@@ -1,3 +1,4 @@
+use crate::download::Client;
 use crate::{
     common::{LOCKFILE, MANIFEST, TOOLS_DIR, project_root},
     download,
@@ -25,12 +26,12 @@ pub fn install() -> Result<()> {
         update::update(None)?;
     }
 
-    let client = download::client()?;
+    let client = download::client();
 
     install_from(&root, &client)
 }
 
-fn install_from(root: &Path, client: &reqwest::blocking::Client) -> Result<()> {
+fn install_from(root: &Path, client: &Client) -> Result<()> {
     let manifest_path = root.join(MANIFEST);
     let lock_path = root.join(LOCKFILE);
 
@@ -341,7 +342,7 @@ source = "github:owner/tool"
             &checksum(binary),
         );
 
-        let client = download::client().unwrap();
+        let client = download::client();
 
         install_from(directory.path(), &client).unwrap();
 
@@ -371,7 +372,7 @@ source = "github:owner/tool"
             &"0".repeat(64),
         );
 
-        let client = download::client().unwrap();
+        let client = download::client();
         let error = install_from(directory.path(), &client).unwrap_err();
 
         assert!(error.to_string().contains("checksum mismatch for tool"));
@@ -402,7 +403,7 @@ source = "github:owner/tool"
         )
         .unwrap();
 
-        let client = download::client().unwrap();
+        let client = download::client();
 
         install_from(directory.path(), &client).unwrap();
 

@@ -1,9 +1,9 @@
+use crate::download::Client;
 use crate::sources::{
     ReleaseProvider,
     release::{Release, ReleaseAsset},
 };
 use anyhow::{Context, Result, bail, ensure};
-use reqwest::{StatusCode, blocking::Client};
 use serde::Deserialize;
 use std::fmt;
 use std::fmt::{Display, Formatter};
@@ -110,18 +110,18 @@ impl ReleaseProvider for GithubSource {
         let mut request = client.get(&url);
 
         if let Ok(token) = std::env::var("GITHUB_TOKEN").or_else(|_| std::env::var("GH_TOKEN")) {
-            request = request.bearer_auth(token);
+            request = request.header("Authorization", format!("Bearer {token}"));
         }
 
-        let release = request
-            .send()
-            .context("failed to fetch latest GitHub release")?
-            .error_for_status()
-            .context("GitHub rejected latest release request")?
-            .json::<GithubRelease>()
-            .context("failed to parse latest GitHub release")?;
+        let mut response = request
+            .call()
+            .context("failed to fetch latest GitHub release")?;
 
-        release.try_into()
+        response
+            .body_mut()
+            .read_json::<GithubRelease>()
+            .context("failed to parse latest GitHub release")?
+            .try_into()
     }
 }
 impl GithubReleaseAsset {
@@ -169,21 +169,21 @@ impl GithubSource {
             let mut request = client.get(&url);
 
             if let Some(token) = token {
-                request = request.bearer_auth(token);
+                request = request.header("Authorization", format!("Bearer {token}"));
             }
 
-            let response = request
-                .send()
-                .with_context(|| format!("failed to fetch GitHub release {tag}"))?;
-
-            if response.status() == StatusCode::NOT_FOUND {
-                continue;
-            }
+            let mut response = match request.call() {
+                Ok(response) => response,
+                Err(ureq::Error::StatusCode(404)) => continue,
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("failed to fetch GitHub release {tag}"));
+                }
+            };
 
             let release = response
-                .error_for_status()
-                .with_context(|| format!("GitHub rejected release request for {tag}"))?
-                .json::<GithubRelease>()
+                .body_mut()
+                .read_json::<GithubRelease>()
                 .with_context(|| format!("failed to parse GitHub release {tag}"))?;
 
             return release.try_into();
@@ -201,6 +201,7 @@ impl GithubSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::download;
     use crate::http_fixture::{Response, Server};
 
     fn asset(name: &str) -> GithubReleaseAsset {
@@ -278,7 +279,7 @@ mod tests {
         ]);
 
         let source = GithubSource::try_from("github:owner/repository".to_owned()).unwrap();
-        let client = Client::builder().build().unwrap();
+        let client = download::client();
 
         let release = source
             .fetch_release_from(&client, "1.2.3", server.url(), Some("secret-token"))
