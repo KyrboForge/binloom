@@ -93,11 +93,28 @@ impl Display for GithubSource {
     }
 }
 
+fn github_token() -> Option<String> {
+    std::env::var("GITHUB_TOKEN")
+        .or_else(|_| std::env::var("GH_TOKEN"))
+        .ok()
+}
+
+fn authed_request(
+    client: &Client,
+    url: &str,
+    token: Option<&str>,
+) -> ureq::RequestBuilder<ureq::typestate::WithoutBody> {
+    let request = client.get(url);
+
+    match token {
+        Some(token) => request.header("Authorization", format!("Bearer {token}")),
+        None => request,
+    }
+}
+
 impl ReleaseProvider for GithubSource {
     fn fetch_release(&self, client: &Client, version: &str) -> Result<Release> {
-        let token = std::env::var("GITHUB_TOKEN")
-            .or_else(|_| std::env::var("GH_TOKEN"))
-            .ok();
+        let token = github_token();
 
         self.fetch_release_from(client, version, GITHUB_API_URL, token.as_deref())
     }
@@ -107,11 +124,8 @@ impl ReleaseProvider for GithubSource {
             "https://api.github.com/repos/{}/{}/releases/latest",
             self.owner, self.repository
         );
-        let mut request = client.get(&url);
-
-        if let Ok(token) = std::env::var("GITHUB_TOKEN").or_else(|_| std::env::var("GH_TOKEN")) {
-            request = request.header("Authorization", format!("Bearer {token}"));
-        }
+        let token = github_token();
+        let request = authed_request(client, &url, token.as_deref());
 
         let mut response = request
             .call()
@@ -166,11 +180,7 @@ impl GithubSource {
                 "{api_url}/repos/{}/{}/releases/tags/{tag}",
                 self.owner, self.repository
             );
-            let mut request = client.get(&url);
-
-            if let Some(token) = token {
-                request = request.header("Authorization", format!("Bearer {token}"));
-            }
+            let request = authed_request(client, &url, token);
 
             let mut response = match request.call() {
                 Ok(response) => response,

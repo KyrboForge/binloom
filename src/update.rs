@@ -80,11 +80,13 @@ fn update_tools(root: &Path, tool_name: Option<&str>, latest: bool) -> Result<()
     let mut versions = BTreeMap::new();
 
     for (name, tool) in selected {
-        let locked = if latest {
-            resolve_latest_tool(name, tool, minimum_age, &client)?
+        let version = if latest {
+            None
         } else {
-            resolve_tool(name, tool, minimum_age, &client)?
+            Some(tool.version.as_str())
         };
+
+        let locked = resolve_tool(name, tool, version, minimum_age, &client)?;
 
         versions.insert(name.to_owned(), locked.version.clone());
         lockfile.tools.insert(name.to_owned(), locked);
@@ -93,11 +95,13 @@ fn update_tools(root: &Path, tool_name: Option<&str>, latest: bool) -> Result<()
     let binloom_version = if tool_name.is_none() {
         let source = binloom_source();
 
-        let (locked, wrapper) = if latest {
-            resolve_latest_binloom(&source, minimum_age, &client)?
+        let version = if latest {
+            None
         } else {
-            resolve_binloom_version(&source, &manifest.binloom.version, minimum_age, &client)?
+            Some(manifest.binloom.version.as_str())
         };
+
+        let (locked, wrapper) = resolve_binloom(&source, version, minimum_age, &client)?;
 
         let version = locked.version.clone();
 
@@ -126,34 +130,19 @@ fn update_tools(root: &Path, tool_name: Option<&str>, latest: bool) -> Result<()
     Ok(())
 }
 
-fn resolve_latest_tool(
-    name: &str,
-    tool: &Tool,
-    minimum_age_minutes: u64,
-    client: &Client,
-) -> Result<LockedTool> {
-    let release = tool.source.provider().fetch_latest_release(client)?;
-
-    resolve_release(
-        name,
-        &tool.source,
-        tool.asset.as_deref(),
-        &release,
-        minimum_age_minutes,
-        client,
-    )
-}
-
 fn resolve_tool(
     name: &str,
     tool: &Tool,
+    version: Option<&str>,
     minimum_age_minutes: u64,
     client: &Client,
 ) -> Result<LockedTool> {
-    let release = tool
-        .source
-        .provider()
-        .fetch_release(client, &tool.version)?;
+    let provider = tool.source.provider();
+
+    let release = match version {
+        Some(version) => provider.fetch_release(client, version)?,
+        None => provider.fetch_latest_release(client)?,
+    };
 
     resolve_release(
         name,
@@ -236,23 +225,18 @@ fn resolve_release(
     })
 }
 
-fn resolve_latest_binloom(
+fn resolve_binloom(
     source: &Source,
+    version: Option<&str>,
     minimum_age_minutes: u64,
     client: &Client,
 ) -> Result<(LockedTool, LockedWrapper)> {
-    let release = source.provider().fetch_latest_release(client)?;
+    let provider = source.provider();
 
-    resolve_binloom_release(source, &release, minimum_age_minutes, client)
-}
-
-fn resolve_binloom_version(
-    source: &Source,
-    version: &str,
-    minimum_age_minutes: u64,
-    client: &Client,
-) -> Result<(LockedTool, LockedWrapper)> {
-    let release = source.provider().fetch_release(client, version)?;
+    let release = match version {
+        Some(version) => provider.fetch_release(client, version)?,
+        None => provider.fetch_latest_release(client)?,
+    };
 
     resolve_binloom_release(source, &release, minimum_age_minutes, client)
 }
@@ -292,15 +276,11 @@ fn ensure_minimum_release_age(
 }
 
 fn fresh_lockfile(existing: Option<Lockfile>) -> Lockfile {
-    let Some(existing) = existing else {
-        return Lockfile::default();
-    };
-
-    Lockfile {
-        wrapper: existing.wrapper,
+    existing.map_or_else(Lockfile::default, |existing| Lockfile {
         binloom: existing.binloom,
+        wrapper: existing.wrapper,
         ..Lockfile::default()
-    }
+    })
 }
 
 pub fn update_binloom() -> Result<()> {
@@ -313,8 +293,9 @@ pub fn update_binloom() -> Result<()> {
 
     let client = download::client();
 
-    let (locked, wrapper) = resolve_latest_binloom(
+    let (locked, wrapper) = resolve_binloom(
         &source,
+        None,
         manifest.update.minimum_release_age_minutes,
         &client,
     )?;
