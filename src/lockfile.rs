@@ -166,16 +166,20 @@ impl TryFrom<&str> for ArtifactFormat {
     type Error = anyhow::Error;
 
     fn try_from(asset: &str) -> Result<Self> {
-        let asset = asset.to_ascii_lowercase();
+        let ends_with = |suffix: &str| {
+            asset
+                .get(asset.len().saturating_sub(suffix.len())..)
+                .is_some_and(|ending| ending.eq_ignore_ascii_case(suffix))
+        };
 
         if [".tar.gz", ".tgz", ".zip", ".tar.xz", ".tar.zst"]
             .iter()
-            .any(|suffix| asset.ends_with(suffix))
+            .any(|suffix| ends_with(suffix))
         {
             bail!("unsupported asset format: {asset}");
         }
 
-        if asset.ends_with(".gz") {
+        if ends_with(".gz") {
             Ok(Self::Gz)
         } else {
             Ok(Self::Raw)
@@ -362,5 +366,19 @@ artifacts = {}
             .insert("../../x".to_owned(), locked_tool("1.0.0"));
 
         assert!(String::try_from(&lockfile).is_err());
+    }
+
+    #[test]
+    fn detects_artifact_formats_case_insensitively() {
+        assert!(matches!(
+            ArtifactFormat::try_from("tool.GZ").unwrap(),
+            ArtifactFormat::Gz
+        ));
+        assert!(matches!(
+            ArtifactFormat::try_from("tool").unwrap(),
+            ArtifactFormat::Raw
+        ));
+        assert!(ArtifactFormat::try_from("tool.TAR.GZ").is_err());
+        assert!(ArtifactFormat::try_from("tool.ZIP").is_err());
     }
 }
