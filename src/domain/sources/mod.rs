@@ -1,15 +1,16 @@
-use crate::domain::sources::gitlab::GitlabSource;
-use crate::domain::sources::{github::GithubSource, release::Release};
 use crate::download::Client;
 use anyhow::Result;
 use serde::Deserialize;
 use std::fmt::{self, Display, Formatter};
 
-pub(crate) mod github;
-pub(crate) mod gitlab;
+mod github;
+mod gitlab;
 pub(crate) mod release;
 
-pub trait ReleaseProvider {
+use release::Release;
+pub(crate) use {github::GithubSource, gitlab::GitlabSource};
+
+pub(crate) trait ReleaseProvider {
     fn fetch_release(&self, client: &Client, version: &str) -> Result<Release>;
 
     fn fetch_latest_release(&self, client: &Client) -> Result<Release>;
@@ -17,13 +18,13 @@ pub trait ReleaseProvider {
 
 #[derive(Debug, Deserialize)]
 #[serde(try_from = "String")]
-pub enum Source {
+pub(crate) enum Source {
     GitHub(GithubSource),
     GitLab(GitlabSource),
 }
 
 impl Source {
-    pub fn provider(&self) -> &dyn ReleaseProvider {
+    pub(crate) fn provider(&self) -> &dyn ReleaseProvider {
         match self {
             Self::GitHub(source) => source,
             Self::GitLab(source) => source,
@@ -72,6 +73,7 @@ mod tests {
             "unsupported source; expected github:owner/repository or gitlab:group[/subgroup]/project"
         );
     }
+
     #[test]
     fn parses_and_displays_nested_gitlab_source() {
         let source = Source::try_from("gitlab:group/subgroup/project".to_owned()).unwrap();

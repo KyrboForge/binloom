@@ -2,7 +2,7 @@ use anyhow::{Result, bail};
 use std::fmt::{self, Display};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Platform {
+pub(crate) enum Platform {
     MacosAarch64,
     MacosX86_64,
     LinuxAarch64,
@@ -10,24 +10,25 @@ pub enum Platform {
 }
 
 impl Platform {
-    pub fn current() -> Result<Self> {
-        Self::try_from((std::env::consts::OS, std::env::consts::ARCH))
-    }
-    pub const ALL: [Self; 4] = [
+    pub(crate) const ALL: [Self; 4] = [
         Self::MacosAarch64,
         Self::MacosX86_64,
         Self::LinuxAarch64,
         Self::LinuxX86_64,
     ];
 
-    pub const fn os_aliases(self) -> &'static [&'static str] {
+    pub(crate) fn current() -> Result<Self> {
+        Self::try_from((std::env::consts::OS, std::env::consts::ARCH))
+    }
+
+    pub(crate) const fn os_aliases(self) -> &'static [&'static str] {
         match self {
             Self::MacosAarch64 | Self::MacosX86_64 => &["macos", "darwin"],
             Self::LinuxAarch64 | Self::LinuxX86_64 => &["linux"],
         }
     }
 
-    pub const fn arch_aliases(self) -> &'static [&'static str] {
+    pub(crate) const fn arch_aliases(self) -> &'static [&'static str] {
         match self {
             Self::MacosAarch64 | Self::LinuxAarch64 => &["aarch64", "arm64"],
             Self::MacosX86_64 | Self::LinuxX86_64 => &["x86_64", "amd64"],

@@ -10,7 +10,7 @@ pub(crate) use ureq::Agent as Client;
 
 const MAX_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
 
-pub fn client() -> Client {
+pub(crate) fn client() -> Client {
     Client::config_builder()
         .user_agent(concat!("binloom/", env!("CARGO_PKG_VERSION")))
         .timeout_connect(Some(Duration::from_secs(10)))
@@ -19,7 +19,7 @@ pub fn client() -> Client {
         .into()
 }
 
-pub fn sha256_url(client: &Client, url: &str) -> Result<String> {
+pub(crate) fn sha256_url(client: &Client, url: &str) -> Result<String> {
     let mut response = client
         .get(url)
         .call()
@@ -70,7 +70,7 @@ fn copy_and_sha256(
     Ok(checksum)
 }
 
-pub fn text_url(client: &Client, url: &str) -> Result<String> {
+pub(crate) fn text_url(client: &Client, url: &str) -> Result<String> {
     const MAX_BYTES: u64 = 1024 * 1024;
 
     let mut response = client
@@ -95,7 +95,11 @@ pub fn text_url(client: &Client, url: &str) -> Result<String> {
     Ok(content)
 }
 
-pub fn download_to(client: &Client, url: &str, mut writer: impl io::Write) -> Result<String> {
+pub(crate) fn download_to(
+    client: &Client,
+    url: &str,
+    mut writer: impl io::Write,
+) -> Result<String> {
     let mut response = client
         .get(url)
         .call()

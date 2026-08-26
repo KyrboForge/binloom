@@ -9,31 +9,45 @@ use toml_edit::{DocumentMut, Item, Value};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Manifest {
+pub(crate) struct Manifest {
     #[serde(rename = "manifest-version")]
-    pub version: u32,
+    pub(crate) version: u32,
 
-    pub binloom: Binloom,
-
-    #[serde(default)]
-    pub tools: BTreeMap<String, Tool>,
+    pub(crate) binloom: Binloom,
 
     #[serde(default)]
-    pub update: UpdateConfig,
+    pub(crate) tools: BTreeMap<String, Tool>,
+
+    #[serde(default)]
+    pub(crate) update: UpdateConfig,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Binloom {
-    pub version: String,
+pub(crate) struct Binloom {
+    pub(crate) version: String,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Tool {
-    pub version: String,
-    pub source: Source,
-    pub asset: Option<String>,
+pub(crate) struct Tool {
+    pub(crate) version: String,
+    pub(crate) source: Source,
+    pub(crate) asset: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub(crate) struct UpdateConfig {
+    pub(crate) minimum_release_age_minutes: u64,
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self {
+            minimum_release_age_minutes: 24 * 60,
+        }
+    }
 }
 
 impl TryFrom<&Path> for Manifest {
@@ -78,7 +92,7 @@ impl Manifest {
     }
 }
 
-pub fn update_versions<'a>(
+pub(crate) fn update_versions<'a>(
     path: &Path,
     binloom: Option<&str>,
     tools: impl IntoIterator<Item = (&'a str, &'a str)>,
@@ -112,19 +126,6 @@ fn set_version(item: &mut Item, version: &str) -> Result<()> {
     *value = Value::from(version);
     *value.decor_mut() = decor;
     Ok(())
-}
-#[derive(Debug, Deserialize)]
-#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
-pub struct UpdateConfig {
-    pub minimum_release_age_minutes: u64,
-}
-
-impl Default for UpdateConfig {
-    fn default() -> Self {
-        Self {
-            minimum_release_age_minutes: 24 * 60,
-        }
-    }
 }
 
 #[cfg(test)]

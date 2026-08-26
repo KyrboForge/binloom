@@ -16,7 +16,7 @@ use std::{
     path::Path,
 };
 
-pub fn install() -> Result<()> {
+pub(crate) fn install() -> Result<()> {
     let root = project_root()?;
     let lock_path = root.join(LOCKFILE);
 

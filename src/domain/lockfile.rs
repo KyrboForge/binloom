@@ -9,19 +9,70 @@ use tempfile::NamedTempFile;
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct Lockfile {
+pub(crate) struct Lockfile {
     #[serde(rename = "lock-version")]
-    pub version: u32,
+    pub(crate) version: u32,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub binloom: Option<LockedTool>,
+    pub(crate) binloom: Option<LockedTool>,
 
     #[serde(default)]
-    pub tools: BTreeMap<String, LockedTool>,
+    pub(crate) tools: BTreeMap<String, LockedTool>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wrapper: Option<LockedWrapper>,
+    pub(crate) wrapper: Option<LockedWrapper>,
 }
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LockedTool {
+    pub(crate) version: String,
+    pub(crate) source: String,
+    pub(crate) tag: String,
+    pub(crate) artifacts: BTreeMap<String, LockedArtifact>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ChecksumSource {
+    Digest,
+    Sidecar,
+    Download,
+
+    #[default]
+    Unknown,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LockedArtifact {
+    pub(crate) asset: String,
+    pub(crate) url: String,
+    pub(crate) sha256: String,
+    pub(crate) format: ArtifactFormat,
+    #[serde(default, rename = "checksum-source")]
+    pub(crate) checksum_source: ChecksumSource,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum ArtifactFormat {
+    Raw,
+    Gz,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LockedWrapper {
+    pub(crate) version: String,
+    pub(crate) url: String,
+    pub(crate) sha256: String,
+    #[serde(default, rename = "checksum-source")]
+    pub(crate) checksum_source: ChecksumSource,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct Toml(String);
 
 impl Default for Lockfile {
     fn default() -> Self {
@@ -33,57 +84,6 @@ impl Default for Lockfile {
         }
     }
 }
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct LockedTool {
-    pub version: String,
-    pub source: String,
-    pub tag: String,
-    pub artifacts: BTreeMap<String, LockedArtifact>,
-}
-
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ChecksumSource {
-    Digest,
-    Sidecar,
-    Download,
-
-    #[default]
-    Unknown,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct LockedArtifact {
-    pub asset: String,
-    pub url: String,
-    pub sha256: String,
-    pub format: ArtifactFormat,
-    #[serde(default, rename = "checksum-source")]
-    pub checksum_source: ChecksumSource,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ArtifactFormat {
-    Raw,
-    Gz,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct LockedWrapper {
-    pub version: String,
-    pub url: String,
-    pub sha256: String,
-    #[serde(default, rename = "checksum-source")]
-    pub checksum_source: ChecksumSource,
-}
-
-#[derive(Debug, Eq, PartialEq)]
-struct Toml(String);
 
 impl Toml {
     fn as_bytes(&self) -> &[u8] {
@@ -122,7 +122,7 @@ impl TryFrom<&Path> for Lockfile {
 }
 
 impl Lockfile {
-    pub fn write(&self, path: &Path) -> Result<()> {
+    pub(crate) fn write(&self, path: &Path) -> Result<()> {
         let content = Toml::try_from(self)?;
 
         let parent = path

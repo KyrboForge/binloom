@@ -7,7 +7,7 @@ use std::{
     path::Path,
 };
 
-pub fn init() -> Result<()> {
+pub(crate) fn init() -> Result<()> {
     println!("Initializing Binloom...");
     let manifest_path = Path::new(common::MANIFEST);
     let wrapper_path = Path::new("binloomw");

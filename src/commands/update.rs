@@ -12,7 +12,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 
-pub fn update(tool_name: Option<&str>) -> Result<()> {
+pub(crate) fn update(tool_name: Option<&str>) -> Result<()> {
     let root = project_root()?;
 
     update_tools(&root, tool_name, true)
@@ -24,7 +24,7 @@ pub(crate) fn lock() -> Result<()> {
     update_tools(&root, None, false)
 }
 
-pub fn lock_added_tool(tool_name: &str) -> Result<()> {
+pub(crate) fn lock_added_tool(tool_name: &str) -> Result<()> {
     let root = project_root()?;
     let lock_path = root.join(LOCKFILE);
 
@@ -126,7 +126,7 @@ fn update_tools(root: &Path, tool_name: Option<&str>, latest: bool) -> Result<()
     Ok(())
 }
 
-pub fn update_binloom() -> Result<()> {
+pub(crate) fn update_binloom() -> Result<()> {
     let root = project_root()?;
     let manifest_path = root.join(MANIFEST);
     let lock_path = root.join(LOCKFILE);

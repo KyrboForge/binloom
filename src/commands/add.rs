@@ -12,7 +12,7 @@ use crate::{
     domain::{manifest::Manifest, sources::Source},
 };
 
-pub fn add(name: &str, source: &str, version: &str, asset: Option<&str>) -> Result<()> {
+pub(crate) fn add(name: &str, source: &str, version: &str, asset: Option<&str>) -> Result<()> {
     let root = project_root()?;
     let manifest_path = root.join(MANIFEST);
 

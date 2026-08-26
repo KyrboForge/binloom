@@ -30,40 +30,37 @@ struct GitlabReleaseAsset {
     direct_asset_url: Option<String>,
 }
 
-impl TryFrom<GitlabReleaseAsset> for ReleaseAsset {
-    type Error = anyhow::Error;
-
-    fn try_from(value: GitlabReleaseAsset) -> std::result::Result<Self, Self::Error> {
-        Ok(Self {
+impl From<GitlabReleaseAsset> for ReleaseAsset {
+    fn from(value: GitlabReleaseAsset) -> Self {
+        Self {
             name: value.name,
             download_url: value.direct_asset_url.unwrap_or(value.url),
             sha256: None,
-        })
+        }
     }
 }
-impl TryFrom<GitlabRelease> for Release {
-    type Error = anyhow::Error;
 
-    fn try_from(value: GitlabRelease) -> std::result::Result<Self, Self::Error> {
+impl From<GitlabRelease> for Release {
+    fn from(value: GitlabRelease) -> Self {
         let assets = value
             .assets
             .links
             .into_iter()
-            .map(ReleaseAsset::try_from)
-            .collect::<Result<Vec<_>>>()?;
+            .map(ReleaseAsset::from)
+            .collect();
 
-        Ok(Self {
+        Self {
             tag: value.tag_name,
             published_at: value.released_at,
             assets,
-        })
+        }
     }
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(try_from = "String")]
-pub struct GitlabSource {
-    pub project: String,
+pub(crate) struct GitlabSource {
+    project: String,
 }
 
 impl TryFrom<String> for GitlabSource {
@@ -133,6 +130,7 @@ impl GitlabSource {
     fn encoded_project(&self) -> String {
         self.project.replace('/', "%2F")
     }
+
     fn fetch_latest_release_from(
         &self,
         client: &Client,
@@ -149,11 +147,12 @@ impl GitlabSource {
             .call()
             .context("failed to fetch latest GitLab release")?;
 
-        response
+        let release = response
             .body_mut()
             .read_json::<GitlabRelease>()
-            .context("failed to parse latest GitLab release")?
-            .try_into()
+            .context("failed to parse latest GitLab release")?;
+
+        Ok(release.into())
     }
 
     fn fetch_release_from(
@@ -190,7 +189,7 @@ impl GitlabSource {
                 .read_json::<GitlabRelease>()
                 .with_context(|| format!("failed to parse GitLab release {tag}"))?;
 
-            return release.try_into();
+            return Ok(release.into());
         }
 
         bail!("release {} not found for {}", version, self.project,)
@@ -241,7 +240,7 @@ mod tests {
             },
         };
 
-        let release = Release::try_from(release).unwrap();
+        let release = Release::from(release);
 
         assert_eq!(release.tag, "v1.2.3");
         assert_eq!(
@@ -340,7 +339,7 @@ mod tests {
         let mut asset = asset("tool.gz");
         asset.direct_asset_url = Some("https://gitlab.example/direct/tool.gz".to_owned());
 
-        let asset = ReleaseAsset::try_from(asset).unwrap();
+        let asset = ReleaseAsset::from(asset);
 
         assert_eq!(asset.download_url, "https://gitlab.example/direct/tool.gz");
     }

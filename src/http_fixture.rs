@@ -5,25 +5,25 @@ use std::{
     thread,
 };
 
-pub struct Response {
-    pub status: u16,
-    pub body: Vec<u8>,
+pub(crate) struct Response {
+    pub(crate) status: u16,
+    pub(crate) body: Vec<u8>,
 }
 
 #[derive(Clone, Debug)]
-pub struct Request {
-    pub path: String,
-    pub authorization: Option<String>,
-    pub private_token: Option<String>,
+pub(crate) struct Request {
+    pub(crate) path: String,
+    pub(crate) authorization: Option<String>,
+    pub(crate) private_token: Option<String>,
 }
 
-pub struct Server {
+pub(crate) struct Server {
     url: String,
     requests: Arc<Mutex<Vec<Request>>>,
 }
 
 impl Server {
-    pub fn start(responses: Vec<Response>) -> Self {
+    pub(crate) fn start(responses: Vec<Response>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -105,11 +105,11 @@ impl Server {
         }
     }
 
-    pub fn url(&self) -> &str {
+    pub(crate) fn url(&self) -> &str {
         &self.url
     }
 
-    pub fn requests(&self) -> Vec<Request> {
+    pub(crate) fn requests(&self) -> Vec<Request> {
         self.requests.lock().unwrap().clone()
     }
 }

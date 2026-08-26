@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
-pub fn exec(arguments: &[OsString]) -> Result<()> {
+pub(crate) fn exec(arguments: &[OsString]) -> Result<()> {
     let (program, arguments) = arguments
         .split_first()
         .context("missing command to execute")?;

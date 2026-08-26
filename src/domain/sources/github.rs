@@ -11,17 +11,17 @@ use std::fmt::{Display, Formatter};
 const GITHUB_API_URL: &str = "https://api.github.com";
 
 #[derive(Debug, Deserialize)]
-pub struct GithubRelease {
-    pub tag_name: String,
-    pub assets: Vec<GithubReleaseAsset>,
-    pub published_at: Option<String>,
+struct GithubRelease {
+    tag_name: String,
+    assets: Vec<GithubReleaseAsset>,
+    published_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct GithubReleaseAsset {
-    pub name: String,
-    pub browser_download_url: String,
-    pub digest: Option<String>,
+struct GithubReleaseAsset {
+    name: String,
+    browser_download_url: String,
+    digest: Option<String>,
 }
 
 impl TryFrom<GithubReleaseAsset> for ReleaseAsset {
@@ -35,6 +35,7 @@ impl TryFrom<GithubReleaseAsset> for ReleaseAsset {
         })
     }
 }
+
 impl TryFrom<GithubRelease> for Release {
     type Error = anyhow::Error;
 
@@ -55,9 +56,9 @@ impl TryFrom<GithubRelease> for Release {
 
 #[derive(Debug, Deserialize)]
 #[serde(try_from = "String")]
-pub struct GithubSource {
-    pub owner: String,
-    pub repository: String,
+pub(crate) struct GithubSource {
+    owner: String,
+    repository: String,
 }
 
 impl TryFrom<String> for GithubSource {
@@ -125,6 +126,7 @@ impl ReleaseProvider for GithubSource {
         self.fetch_latest_release_from(client, GITHUB_API_URL, token.as_deref())
     }
 }
+
 impl GithubReleaseAsset {
     fn sha256_from_digest(&self) -> Result<Option<String>> {
         let Some(digest) = self.digest.as_deref() else {

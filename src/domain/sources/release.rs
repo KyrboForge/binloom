@@ -6,21 +6,21 @@ use anyhow::{Context, bail};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug)]
-pub struct Release {
-    pub tag: String,
-    pub published_at: Option<String>,
-    pub assets: Vec<ReleaseAsset>,
+pub(crate) struct Release {
+    pub(crate) tag: String,
+    pub(crate) published_at: Option<String>,
+    pub(crate) assets: Vec<ReleaseAsset>,
 }
 
 #[derive(Debug)]
-pub struct ReleaseAsset {
-    pub name: String,
-    pub download_url: String,
-    pub sha256: Option<String>,
+pub(crate) struct ReleaseAsset {
+    pub(crate) name: String,
+    pub(crate) download_url: String,
+    pub(crate) sha256: Option<String>,
 }
 
 impl Release {
-    pub fn find_asset_by_pattern(
+    pub(crate) fn find_asset_by_pattern(
         &self,
         pattern: &str,
         version: &str,
@@ -66,7 +66,7 @@ impl Release {
             }
         }
     }
-    pub fn find_asset(
+    pub(crate) fn find_asset(
         &self,
         tool_name: &str,
         platform: Platform,
@@ -159,7 +159,7 @@ impl Release {
         }
     }
 
-    pub fn checksum_from_sidecar(
+    pub(crate) fn checksum_from_sidecar(
         &self,
         client: &Client,
         asset: &ReleaseAsset,
@@ -203,7 +203,7 @@ impl Release {
         Ok(None)
     }
 
-    pub fn find_asset_by_name(&self, asset_name: &str) -> anyhow::Result<&ReleaseAsset> {
+    pub(crate) fn find_asset_by_name(&self, asset_name: &str) -> anyhow::Result<&ReleaseAsset> {
         self.assets
             .iter()
             .find(|asset| asset.name == asset_name)
