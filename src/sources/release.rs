@@ -3,7 +3,7 @@ use crate::download;
 use crate::download::Client;
 use crate::platform::Platform;
 use anyhow::{Context, bail};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug)]
 pub struct Release {
@@ -66,7 +66,12 @@ impl Release {
             }
         }
     }
-    pub fn find_asset(&self, tool_name: &str, platform: Platform) -> anyhow::Result<&ReleaseAsset> {
+    pub fn find_asset(
+        &self,
+        tool_name: &str,
+        platform: Platform,
+        emitted_warnings: &mut BTreeSet<String>,
+    ) -> anyhow::Result<&ReleaseAsset> {
         let tool_name = tool_name.to_lowercase();
 
         let matches: Vec<_> = self
@@ -97,7 +102,12 @@ impl Release {
             .collect::<Vec<_>>();
 
         let matches = if gzip_matches.len() == 1 {
-            Self::warn_dropped(&matches, &gzip_matches, "the only gzip candidate");
+            Self::warn_dropped(
+                &matches,
+                &gzip_matches,
+                "the only gzip candidate",
+                emitted_warnings,
+            );
             gzip_matches
         } else {
             matches
@@ -112,6 +122,7 @@ impl Release {
                     .to_ascii_lowercase()
                     .contains(platform.os_aliases()[0])
             },
+            emitted_warnings,
         );
 
         let matches = Self::prefer(
@@ -123,11 +134,15 @@ impl Release {
                     .to_ascii_lowercase()
                     .contains(platform.arch_aliases()[0])
             },
+            emitted_warnings,
         );
 
-        let matches = Self::prefer(matches, "gzip format", |asset| {
-            asset.name.to_ascii_lowercase().ends_with(".gz")
-        });
+        let matches = Self::prefer(
+            matches,
+            "gzip format",
+            |asset| asset.name.to_ascii_lowercase().ends_with(".gz"),
+            emitted_warnings,
+        );
 
         match matches.as_slice() {
             [asset] => Ok(asset),
@@ -243,6 +258,7 @@ impl Release {
         assets: Vec<&'a ReleaseAsset>,
         reason: &str,
         predicate: impl Fn(&ReleaseAsset) -> bool,
+        emitted_warnings: &mut BTreeSet<String>,
     ) -> Vec<&'a ReleaseAsset> {
         let preferred = assets
             .iter()
@@ -250,7 +266,7 @@ impl Release {
             .filter(|asset| predicate(asset))
             .collect::<Vec<_>>();
 
-        Self::warn_dropped(&assets, &preferred, reason);
+        Self::warn_dropped(&assets, &preferred, reason, emitted_warnings);
 
         if preferred.is_empty() {
             assets
@@ -259,7 +275,12 @@ impl Release {
         }
     }
 
-    fn warn_dropped(assets: &[&ReleaseAsset], preferred: &[&ReleaseAsset], reason: &str) {
+    fn warn_dropped(
+        assets: &[&ReleaseAsset],
+        preferred: &[&ReleaseAsset],
+        reason: &str,
+        emitted_warnings: &mut BTreeSet<String>,
+    ) {
         if preferred.is_empty() || preferred.len() == assets.len() {
             return;
         }
@@ -275,9 +296,11 @@ impl Release {
             .collect::<Vec<_>>()
             .join(", ");
 
-        warn(&format!(
-            "asset selection preferred {reason}; dropped: {dropped}"
-        ));
+        let message = format!("asset selection preferred {reason}; dropped: {dropped}");
+
+        if emitted_warnings.insert(message.clone()) {
+            warn(&message);
+        }
     }
 }
 
@@ -312,9 +335,11 @@ mod tests {
             (Platform::LinuxAarch64, "lefthook_2.1.10_Linux_aarch64.gz"),
             (Platform::LinuxX86_64, "lefthook_2.1.10_Linux_x86_64.gz"),
         ];
-
+        let mut emitted_warnings = BTreeSet::new();
         for (platform, expected_name) in expected {
-            let matched = release.find_asset("lefthook", platform).unwrap();
+            let matched = release
+                .find_asset("lefthook", platform, &mut emitted_warnings)
+                .unwrap();
 
             assert_eq!(matched.name, expected_name);
         }
@@ -331,8 +356,9 @@ mod tests {
             ],
         };
 
+        let mut emitted_warnings = BTreeSet::new();
         let error = release
-            .find_asset("tool", Platform::LinuxX86_64)
+            .find_asset("tool", Platform::LinuxX86_64, &mut emitted_warnings)
             .unwrap_err();
 
         assert!(
@@ -393,8 +419,11 @@ mod tests {
                 asset("tool_1.0.0_linux_x86_64.gz.sha256"),
             ],
         };
+        let mut emitted_warnings = BTreeSet::new();
 
-        let matched = release.find_asset("tool", Platform::LinuxX86_64).unwrap();
+        let matched = release
+            .find_asset("tool", Platform::LinuxX86_64, &mut emitted_warnings)
+            .unwrap();
 
         assert_eq!(matched.name, "tool_1.0.0_linux_x86_64.gz");
     }
@@ -408,8 +437,11 @@ mod tests {
                 asset("tool_1.0.0_MacOS_arm64.gz"),
             ],
         };
+        let mut emitted_warnings = BTreeSet::new();
 
-        let matched = release.find_asset("tool", Platform::MacosAarch64).unwrap();
+        let matched = release
+            .find_asset("tool", Platform::MacosAarch64, &mut emitted_warnings)
+            .unwrap();
 
         assert_eq!(matched.name, "tool_1.0.0_MacOS_arm64.gz");
     }
@@ -459,5 +491,27 @@ mod tests {
 
             assert_eq!(matched.name, expected_name);
         }
+    }
+
+    #[test]
+    fn emits_identical_selection_warning_only_once() {
+        let release = Release {
+            tag: "v1.0.0".to_owned(),
+            published_at: None,
+            assets: vec![
+                asset("tool_macos_linux_aarch64_x86_64"),
+                asset("tool_macos_linux_aarch64_x86_64.gz"),
+            ],
+        };
+
+        let mut emitted_warnings = BTreeSet::new();
+
+        for platform in Platform::ALL {
+            release
+                .find_asset("tool", platform, &mut emitted_warnings)
+                .unwrap();
+        }
+
+        assert_eq!(emitted_warnings.len(), 1);
     }
 }

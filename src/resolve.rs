@@ -6,7 +6,7 @@ use crate::manifest::Tool;
 use crate::platform::Platform;
 use crate::sources::{Source, release};
 use anyhow::{Context, bail};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime};
 
@@ -99,10 +99,11 @@ fn resolve_release(
     ensure_minimum_release_age(release, minimum_age_minutes, OffsetDateTime::now_utc())?;
     let version = version_from_tag(&release.tag)?;
     let mut artifacts = BTreeMap::new();
+    let mut emitted_warnings = BTreeSet::new();
     for platform in Platform::ALL {
         let asset = match asset_pattern {
             Some(pattern) => release.find_asset_by_pattern(pattern, &version, platform)?,
-            None => release.find_asset(name, platform)?,
+            None => release.find_asset(name, platform, &mut emitted_warnings)?,
         };
         let (sha256, checksum_source) = resolve_checksum(client, release, asset, checksum_cache)?;
         artifacts.insert(
