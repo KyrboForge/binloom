@@ -1,3 +1,5 @@
+#[cfg(not(unix))]
+compile_error!("binloom currently supports Unix-like systems only");
 mod add;
 mod common;
 mod download;
