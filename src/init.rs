@@ -85,7 +85,11 @@ fn generate_binloomw(path: &Path) -> io::Result<()> {
 
     let mut permissions = file.metadata()?.permissions();
     permissions.set_mode(0o755);
-    file.set_permissions(permissions)
+    file.set_permissions(permissions)?;
+
+    drop(file);
+
+    Ok(())
 }
 
 #[cfg(test)]
