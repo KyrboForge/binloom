@@ -115,7 +115,7 @@ mod tests {
 
     #[test]
     fn calculates_sha256() {
-        let checksum = sha256("hello".as_bytes(), MAX_DOWNLOAD_BYTES).unwrap();
+        let checksum = sha256(&b"hello"[..], MAX_DOWNLOAD_BYTES).unwrap();
 
         assert_eq!(
             checksum,
@@ -126,7 +126,7 @@ mod tests {
     fn rejects_downloads_over_limit() {
         let mut output = Vec::new();
 
-        let error = copy_and_sha256("hello".as_bytes(), &mut output, 4).unwrap_err();
+        let error = copy_and_sha256(&b"hello"[..], &mut output, 4).unwrap_err();
 
         assert!(error.to_string().contains("exceeds 4 bytes"));
         assert!(output.is_empty());

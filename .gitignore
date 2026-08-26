@@ -1,6 +1,7 @@
 /target
 .idea
-binloom.toml
-binloom.lock
-main
+
+# Local-only dogfooding state; released projects should commit these files.
+/binloom.toml
+/binloom.lock
 .tools

@@ -164,16 +164,15 @@ fn link_tool(root: &Path, name: &str, version: &str) -> Result<()> {
     let link = bin_directory.join(name);
     let target = Path::new("..").join(name).join(version).join(name);
 
-    match fs::remove_file(&link) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(error).with_context(|| format!("failed to replace {}", link.display()));
-        }
-    }
+    let temporary = tempfile::tempdir_in(&bin_directory)
+        .context("failed to create temporary link directory")?;
+    let temporary_link = temporary.path().join(name);
 
-    std::os::unix::fs::symlink(&target, &link)
-        .with_context(|| format!("failed to link {}", link.display()))
+    std::os::unix::fs::symlink(&target, &temporary_link)
+        .with_context(|| format!("failed to create temporary link for {name}"))?;
+
+    fs::rename(&temporary_link, &link)
+        .with_context(|| format!("failed to replace {}", link.display()))
 }
 
 #[cfg(test)]
@@ -413,5 +412,19 @@ source = "github:owner/tool"
             format!("{}\n", checksum(binary))
         );
         assert_eq!(server.requests().len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replaces_existing_tool_link() {
+        let directory = tempfile::tempdir().unwrap();
+
+        link_tool(directory.path(), "tool", "1.0.0").unwrap();
+        link_tool(directory.path(), "tool", "2.0.0").unwrap();
+
+        assert_eq!(
+            fs::read_link(directory.path().join(".tools/.bin/tool")).unwrap(),
+            Path::new("../tool/2.0.0/tool")
+        );
     }
 }

@@ -51,6 +51,12 @@ read_lock_value() {
 
             if (line ~ "^[[:space:]]*" key "[[:space:]]*=") {
                 sub(/^[^=]*=[[:space:]]*"/, "", line)
+
+                if (line ~ /\\/) {
+                    print "error: escaped TOML values are not supported by binloomw" > "/dev/stderr"
+                    exit 2
+                }
+
                 sub(/".*$/, "", line)
                 print line
                 exit
@@ -103,7 +109,7 @@ verify_file() {
 LOCKED_WRAPPER_VERSION=$(read_lock_value "wrapper" "version")
 WRAPPER_URL=$(read_lock_value "wrapper" "url")
 WRAPPER_SHA256=$(read_lock_value "wrapper" "sha256")
-WRAPPER_PATH="$ROOT_DIR/binloomw"
+WRAPPER_PATH="$ROOT_DIR/${0##*/}"
 
 if [ -n "${LOCKED_WRAPPER_VERSION}${WRAPPER_URL}${WRAPPER_SHA256}" ]; then
     if [ -z "$LOCKED_WRAPPER_VERSION" ] ||

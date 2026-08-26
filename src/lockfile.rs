@@ -82,12 +82,23 @@ pub struct LockedWrapper {
     pub checksum_source: ChecksumSource,
 }
 
-impl TryFrom<&Lockfile> for String {
+#[derive(Debug, Eq, PartialEq)]
+struct Toml(String);
+
+impl Toml {
+    fn as_bytes(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+}
+
+impl TryFrom<&Lockfile> for Toml {
     type Error = anyhow::Error;
 
     fn try_from(lockfile: &Lockfile) -> Result<Self, Self::Error> {
         lockfile.validate()?;
-        toml::to_string_pretty(lockfile).context("failed to serialize binloom.lock")
+        toml::to_string_pretty(lockfile)
+            .map(Toml)
+            .context("failed to serialize binloom.lock")
     }
 }
 
@@ -112,7 +123,7 @@ impl TryFrom<&Path> for Lockfile {
 
 impl Lockfile {
     pub fn write(&self, path: &Path) -> Result<()> {
-        let content = String::try_from(self)?;
+        let content = Toml::try_from(self)?;
 
         let parent = path
             .parent()
@@ -139,6 +150,16 @@ impl Lockfile {
             .persist(path)
             .map_err(|error| error.error)
             .with_context(|| format!("failed to replace {}", path.display()))?;
+
+        #[cfg(unix)]
+        {
+            let directory = fs::File::open(parent)
+                .with_context(|| format!("failed to open {}", parent.display()))?;
+
+            directory
+                .sync_all()
+                .with_context(|| format!("failed to sync {}", parent.display()))?;
+        }
 
         Ok(())
     }
@@ -216,14 +237,14 @@ mod tests {
             },
         );
 
-        let first: String = (&lockfile).try_into().unwrap();
-        let second: String = (&lockfile).try_into().unwrap();
+        let first: Toml = (&lockfile).try_into().unwrap();
+        let second: Toml = (&lockfile).try_into().unwrap();
 
         assert_eq!(first, second);
-        assert!(first.contains("[tools.lefthook]"));
-        assert!(first.contains("[tools.lefthook.artifacts.linux-x86_64]"));
-        assert!(first.contains("format = \"gz\""));
-        assert!(first.contains("checksum-source = \"digest\""));
+        assert!(first.0.contains("[tools.lefthook]"));
+        assert!(first.0.contains("[tools.lefthook.artifacts.linux-x86_64]"));
+        assert!(first.0.contains("format = \"gz\""));
+        assert!(first.0.contains("checksum-source = \"digest\""));
 
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("binloom.lock");
@@ -231,8 +252,8 @@ mod tests {
         lockfile.write(&path).unwrap();
 
         let loaded = Lockfile::try_from(path.as_path()).unwrap();
-        let legacy_content = first.replace("checksum-source = \"digest\"\n", "");
-        let legacy: Lockfile = toml::from_str(&legacy_content).unwrap();
+        let legacy_content = first.0.replace("checksum-source = \"digest\"\n", "");
+        let legacy: Lockfile = toml::from_str(legacy_content.as_str()).unwrap();
 
         assert_eq!(
             legacy.tools["lefthook"].artifacts["linux-x86_64"].checksum_source,
@@ -299,12 +320,16 @@ mod tests {
             ..Lockfile::default()
         };
 
-        let content = String::try_from(&lockfile).unwrap();
+        let content = Toml::try_from(&lockfile).unwrap();
 
-        assert!(content.contains("[wrapper]"));
-        assert!(content.contains("version = \"0.2.0\""));
-        assert!(content.contains("url = \"https://example.com/binloomw\""));
-        assert!(content.contains(&format!("sha256 = \"{}\"", "a".repeat(64))));
+        assert!(content.0.contains("[wrapper]"));
+        assert!(content.0.contains("version = \"0.2.0\""));
+        assert!(content.0.contains("url = \"https://example.com/binloomw\""));
+        assert!(
+            content
+                .0
+                .contains(&format!("sha256 = \"{}\"", "a".repeat(64)))
+        );
     }
     #[test]
     fn rejects_unsafe_lockfile_components() {
@@ -358,14 +383,14 @@ artifacts = {}
             .tools
             .insert("example".to_owned(), locked_tool("../../x"));
 
-        assert!(String::try_from(&lockfile).is_err());
+        assert!(Toml::try_from(&lockfile).is_err());
 
         lockfile.tools.clear();
         lockfile
             .tools
             .insert("../../x".to_owned(), locked_tool("1.0.0"));
 
-        assert!(String::try_from(&lockfile).is_err());
+        assert!(Toml::try_from(&lockfile).is_err());
     }
 
     #[test]

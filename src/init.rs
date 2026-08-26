@@ -100,6 +100,13 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::{fs, io, process::Command};
 
+    fn checksum(bytes: &[u8]) -> String {
+        Sha256::digest(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
     #[test]
     fn generates_manifest_without_overwriting_it() {
         let directory = tempfile::tempdir().unwrap();
@@ -186,10 +193,7 @@ printf 'fake binloom: %s\n' "$*"
         fs::write(&asset, fake_binary).unwrap();
         generate_binloomw(&wrapper).unwrap();
 
-        let checksum = Sha256::digest(fake_binary)
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
+        let checksum = checksum(fake_binary);
 
         let platform = Platform::current().unwrap();
 
@@ -265,7 +269,7 @@ format = "raw"
     #[test]
     fn wrapper_updates_itself_from_lockfile() {
         let directory = tempfile::tempdir().unwrap();
-        let wrapper = directory.path().join("binloomw");
+        let wrapper = directory.path().join("custom-wrapper");
         let updated_wrapper = directory.path().join("updated-binloomw");
 
         generate_binloomw(&wrapper).unwrap();
@@ -276,10 +280,7 @@ printf 'updated wrapper: %s\n' "$*"
 
         fs::write(&updated_wrapper, updated_content).unwrap();
 
-        let checksum = Sha256::digest(updated_content)
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
+        let checksum = checksum(updated_content);
 
         fs::write(
             directory.path().join("binloom.lock"),
@@ -344,5 +345,34 @@ format = "raw"
                 .contains("unsafe Binloom version")
         );
         assert!(!directory.path().join(".tools").exists());
+    }
+
+    #[test]
+    fn wrapper_rejects_escaped_lock_values() {
+        let directory = tempfile::tempdir().unwrap();
+        let wrapper = directory.path().join("binloomw");
+
+        generate_binloomw(&wrapper).unwrap();
+
+        fs::write(
+            directory.path().join("binloom.lock"),
+            r#"lock-version = 1
+
+[wrapper]
+version = "test"
+url = "https://example.com/a\\b"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+"#,
+        )
+        .unwrap();
+
+        let output = Command::new(&wrapper).output().unwrap();
+
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8(output.stderr)
+                .unwrap()
+                .contains("escaped TOML values are not supported")
+        );
     }
 }
