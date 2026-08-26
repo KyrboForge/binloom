@@ -49,8 +49,8 @@
           },
           "source": {
             "type": "string",
-            "pattern": "^github:[^/\\\\s]+/[^/\\\\s]+$",
-            "description": "GitHub source in github:owner/repository format."
+            "pattern": "^(github:[^/\\s]+/[^/\\s]+|gitlab:[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)+)$",
+            "description": "Release source in github:owner/repository or gitlab:group[/subgroup]/project format."
           },
           "asset": {
             "type": "string",

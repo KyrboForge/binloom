@@ -14,6 +14,7 @@ pub struct Response {
 pub struct Request {
     pub path: String,
     pub authorization: Option<String>,
+    pub private_token: Option<String>,
 }
 
 pub struct Server {
@@ -55,15 +56,27 @@ impl Server {
                     .unwrap()
                     .to_owned();
 
-                let authorization = lines.find_map(|line| {
-                    let (name, value) = line.split_once(':')?;
-                    name.eq_ignore_ascii_case("authorization")
-                        .then(|| value.trim().to_owned())
-                });
+                let mut authorization = None;
+                let mut private_token = None;
+
+                for line in lines {
+                    let Some((name, value)) = line.split_once(':') else {
+                        continue;
+                    };
+
+                    if name.eq_ignore_ascii_case("authorization") {
+                        authorization = Some(value.trim().to_owned());
+                    }
+
+                    if name.eq_ignore_ascii_case("private-token") {
+                        private_token = Some(value.trim().to_owned());
+                    }
+                }
 
                 captured.lock().unwrap().push(Request {
                     path,
                     authorization,
+                    private_token,
                 });
 
                 let reason = match response.status {

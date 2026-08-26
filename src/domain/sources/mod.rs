@@ -1,3 +1,4 @@
+use crate::domain::sources::gitlab::GitlabSource;
 use crate::domain::sources::{github::GithubSource, release::Release};
 use crate::download::Client;
 use anyhow::Result;
@@ -5,6 +6,7 @@ use serde::Deserialize;
 use std::fmt::{self, Display, Formatter};
 
 pub(crate) mod github;
+pub(crate) mod gitlab;
 pub(crate) mod release;
 
 pub trait ReleaseProvider {
@@ -17,14 +19,14 @@ pub trait ReleaseProvider {
 #[serde(try_from = "String")]
 pub enum Source {
     GitHub(GithubSource),
-    //GitLab(GitlabSource),
+    GitLab(GitlabSource),
 }
 
 impl Source {
     pub fn provider(&self) -> &dyn ReleaseProvider {
         match self {
             Self::GitHub(source) => source,
-            // Self::GitLab(source) => source,
+            Self::GitLab(source) => source,
         }
     }
 }
@@ -35,7 +37,8 @@ impl TryFrom<String> for Source {
     fn try_from(value: String) -> Result<Self, Self::Error> {
         match value.split_once(':').map(|(kind, _)| kind) {
             Some("github") => GithubSource::try_from(value).map(Self::GitHub),
-            _ => Err("unsupported source; expected github:owner/repository".to_owned()),
+            Some("gitlab") => GitlabSource::try_from(value).map(Self::GitLab),
+            _ => Err("unsupported source; expected github:owner/repository or gitlab:group[/subgroup]/project".to_owned()),
         }
     }
 }
@@ -44,6 +47,7 @@ impl Display for Source {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::GitHub(source) => source.fmt(formatter),
+            Self::GitLab(source) => source.fmt(formatter),
         }
     }
 }
@@ -65,17 +69,19 @@ mod tests {
 
         assert_eq!(
             source.unwrap_err(),
-            "unsupported source; expected github:owner/repository"
+            "unsupported source; expected github:owner/repository or gitlab:group[/subgroup]/project"
         );
+    }
+    #[test]
+    fn parses_and_displays_nested_gitlab_source() {
+        let source = Source::try_from("gitlab:group/subgroup/project".to_owned()).unwrap();
+
+        assert_eq!(source.to_string(), "gitlab:group/subgroup/project");
     }
 
     #[test]
-    fn rejects_unsupported_provider() {
-        let source = Source::try_from("gitlab:owner/repository".to_owned());
-
-        assert_eq!(
-            source.unwrap_err(),
-            "unsupported source; expected github:owner/repository"
-        );
+    fn parses_and_displays_gitlab_source() {
+        let source = Source::try_from("gitlab:group/project".to_owned()).unwrap();
+        assert_eq!(source.to_string(), "gitlab:group/project");
     }
 }

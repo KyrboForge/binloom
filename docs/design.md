@@ -10,7 +10,7 @@ does not manage application dependencies or language runtimes.
 
 The MVP supports:
 
-- public GitHub Releases;
+- public GitHub and GitLab Releases;
 - exact tool versions;
 - macOS and Linux on ARM64 and x86-64;
 - raw executables and single `.gz` files;
@@ -18,7 +18,7 @@ The MVP supports:
 - repository-local installation;
 - Binloom bootstrapping through a committed POSIX shell wrapper.
 
-Windows, private repositories, additional sources, semantic version ranges,
+Windows, private repositories, other release sources, semantic version ranges,
 plugins, registry services, complex archives, and persistent shell integration
 are outside the MVP.
 
@@ -67,6 +67,20 @@ source = "github:evilmartians/lefthook"
 
 The schema comment enables validation in editors that support TOML schemas.
 Binloom preserves comments while changing versions.
+
+Release sources use `github:owner/repository` or
+`gitlab:group[/subgroup]/project`. GitLab project paths may contain nested
+groups:
+
+```toml
+[tools.example]
+version = "1.0.0"
+source = "gitlab:group/subgroup/project"
+```
+
+`GITLAB_TOKEN` optionally authenticates GitLab API requests through the
+`PRIVATE-TOKEN` header. Public repositories are supported; private asset
+downloads remain outside the MVP.
 
 During automatic resolution, Binloom matches release assets using the tool
 name and case-insensitive platform aliases. It may prefer gzip assets and
@@ -201,7 +215,8 @@ the committed lockfile.
 ## Installation and trust rules
 
 - The committed manifest, lockfile, and wrapper are trusted repository state.
-- GitHub metadata and downloaded bytes are untrusted remote input.
+- GitHub and GitLab release metadata and downloaded bytes are untrusted remote
+  input.
 - Published digests and checksum sidecars provide an upstream checksum.
 - When neither exists, Binloom warns, hashes the downloaded bytes, and records
   `checksum-source = "download"`. This is trust on first use: later installs

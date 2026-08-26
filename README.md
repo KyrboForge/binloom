@@ -134,8 +134,17 @@ version = "2.1.11"
 source = "github:evilmartians/lefthook"
 ```
 
-Binloom discovers platform assets from GitHub Releases. When a release is
-ambiguous, an optional pattern can narrow the match:
+Supported release source formats are:
+
+- `github:owner/repository`
+- `gitlab:group[/subgroup]/project`
+
+GitLab projects may use nested groups. `GITLAB_TOKEN` optionally authenticates
+GitLab API requests through the `PRIVATE-TOKEN` header. Public repositories are
+supported; private asset downloads are not.
+
+Binloom discovers platform assets from GitHub and GitLab Releases. When a
+release is ambiguous, an optional pattern can narrow the match:
 
 ```toml
 [tools.example]
@@ -186,9 +195,9 @@ itself atomically from the locked release asset and restarts.
 
 ## 🎯 Scope
 
-Binloom currently supports public GitHub Releases on macOS and Linux for ARM64
-and x86-64. Assets may be raw executables or single gzip-compressed
-executables.
+Binloom currently supports public GitHub and GitLab Releases on macOS and
+Linux for ARM64 and x86-64. Assets may be raw executables or single
+gzip-compressed executables.
 
 It is not a language package manager, runtime manager, daemon, GUI, or remote
 package registry. See the [MVP design](docs/design.md) for the detailed
