@@ -23,7 +23,7 @@ pub fn install() -> Result<()> {
         .try_exists()
         .context("failed to check binloom.lock")?
     {
-        update::update(None)?;
+        update::lock()?;
     }
 
     let client = download::client();

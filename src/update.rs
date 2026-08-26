@@ -19,6 +19,12 @@ pub fn update(tool_name: Option<&str>) -> Result<()> {
     update_tools(&root, tool_name, true)
 }
 
+pub(crate) fn lock() -> Result<()> {
+    let root = project_root()?;
+
+    update_tools(&root, None, false)
+}
+
 pub fn lock_added_tool(tool_name: &str) -> Result<()> {
     let root = project_root()?;
     let lock_path = root.join(LOCKFILE);
