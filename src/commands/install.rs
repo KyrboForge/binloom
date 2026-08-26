@@ -1,11 +1,12 @@
-use crate::download::Client;
+use super::update;
 use crate::{
     common::{LOCKFILE, MANIFEST, TOOLS_DIR, project_root},
+    domain::{
+        lockfile::{ArtifactFormat, Lockfile},
+        manifest::Manifest,
+        platform::Platform,
+    },
     download,
-    lockfile::{ArtifactFormat, Lockfile},
-    manifest::Manifest,
-    platform::Platform,
-    update,
 };
 use anyhow::{Context, Result, ensure};
 use flate2::read::GzDecoder;
@@ -31,14 +32,14 @@ pub fn install() -> Result<()> {
     install_from(&root, &client)
 }
 
-fn install_from(root: &Path, client: &Client) -> Result<()> {
+fn install_from(root: &Path, client: &download::Client) -> Result<()> {
     let manifest_path = root.join(MANIFEST);
     let lock_path = root.join(LOCKFILE);
 
     let manifest = Manifest::try_from(manifest_path.as_path())?;
     let lockfile = Lockfile::try_from(lock_path.as_path())?;
 
-    ensure_manifest_matches_lockfile(&manifest, &lockfile)?;
+    manifest.ensure_matches_lockfile(&lockfile)?;
     ensure!(!lockfile.tools.is_empty(), "no tools in binloom.lock");
 
     let platform = Platform::current()?;
@@ -107,22 +108,6 @@ fn install_from(root: &Path, client: &Client) -> Result<()> {
     Ok(())
 }
 
-fn ensure_manifest_matches_lockfile(manifest: &Manifest, lockfile: &Lockfile) -> Result<()> {
-    let matches = manifest.tools.len() == lockfile.tools.len()
-        && manifest.tools.iter().all(|(name, tool)| {
-            lockfile.tools.get(name).is_some_and(|locked| {
-                locked.version == tool.version && locked.source == tool.source.to_string()
-            })
-        });
-
-    ensure!(
-        matches,
-        "binloom.toml and binloom.lock are out of sync; run `binloom update`"
-    );
-
-    Ok(())
-}
-
 fn cached_artifact_matches(
     destination: &Path,
     checksum_stamp: &Path,
@@ -179,10 +164,8 @@ fn link_tool(root: &Path, name: &str, version: &str) -> Result<()> {
 mod tests {
     use super::*;
     use crate::{
+        domain::lockfile::{ChecksumSource, LockedArtifact, LockedTool},
         http_fixture::{Response, Server},
-        lockfile::{ChecksumSource, LockedArtifact, LockedTool},
-        manifest::{Binloom, Tool, UpdateConfig},
-        sources::Source,
     };
     use flate2::{Compression, write::GzEncoder};
     use sha2::{Digest, Sha256};
@@ -271,59 +254,6 @@ source = "github:owner/tool"
         std::fs::write(&checksum_stamp, "expected\n").unwrap();
 
         assert!(cached_artifact_matches(&destination, &checksum_stamp, "expected").unwrap());
-    }
-
-    #[test]
-    fn rejects_manifest_and_lockfile_drift() {
-        let manifest = Manifest {
-            version: 1,
-            binloom: Binloom {
-                version: "0.2.2".to_owned(),
-            },
-            tools: BTreeMap::from([(
-                "tool".to_owned(),
-                Tool {
-                    version: "1.0.0".to_owned(),
-                    source: Source::try_from("github:owner/tool".to_owned()).unwrap(),
-                    asset: None,
-                },
-            )]),
-            update: UpdateConfig::default(),
-        };
-
-        let mut lockfile = Lockfile::default();
-        lockfile.tools.insert(
-            "tool".to_owned(),
-            LockedTool {
-                version: "1.0.0".to_owned(),
-                source: "github:owner/tool".to_owned(),
-                tag: "v1.0.0".to_owned(),
-                artifacts: BTreeMap::new(),
-            },
-        );
-
-        assert!(ensure_manifest_matches_lockfile(&manifest, &lockfile).is_ok());
-
-        lockfile.tools.get_mut("tool").unwrap().version = "2.0.0".to_owned();
-
-        let error = ensure_manifest_matches_lockfile(&manifest, &lockfile).unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "binloom.toml and binloom.lock are out of sync; run `binloom update`"
-        );
-
-        lockfile.tools.get_mut("tool").unwrap().version = "1.0.0".to_owned();
-        lockfile.tools.insert(
-            "extra".to_owned(),
-            LockedTool {
-                version: "1.0.0".to_owned(),
-                source: "github:owner/extra".to_owned(),
-                tag: "v1.0.0".to_owned(),
-                artifacts: BTreeMap::new(),
-            },
-        );
-
-        assert!(ensure_manifest_matches_lockfile(&manifest, &lockfile).is_err());
     }
 
     #[test]

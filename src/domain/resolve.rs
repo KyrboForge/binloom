@@ -1,10 +1,12 @@
 use crate::common::{validate_version, warn};
+use crate::domain::lockfile::{
+    ArtifactFormat, ChecksumSource, LockedArtifact, LockedTool, LockedWrapper,
+};
+use crate::domain::manifest::Tool;
+use crate::domain::platform::Platform;
+use crate::domain::sources::{Source, release};
 use crate::download;
 use crate::download::Client;
-use crate::lockfile::{ArtifactFormat, ChecksumSource, LockedArtifact, LockedTool, LockedWrapper};
-use crate::manifest::Tool;
-use crate::platform::Platform;
-use crate::sources::{Source, release};
 use anyhow::{Context, bail};
 use std::collections::{BTreeMap, BTreeSet};
 use time::format_description::well_known::Rfc3339;
@@ -192,8 +194,8 @@ fn resolve_binloom_release(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::sources::release::{Release, ReleaseAsset};
     use crate::http_fixture::{Response, Server};
-    use crate::sources::release::{Release, ReleaseAsset};
 
     fn asset(name: &str) -> ReleaseAsset {
         ReleaseAsset {

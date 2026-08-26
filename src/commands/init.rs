@@ -79,7 +79,7 @@ fn add_to_gitignore(path: &Path) -> io::Result<bool> {
 fn generate_binloomw(path: &Path) -> io::Result<()> {
     let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
     let wrapper =
-        include_str!("binloomw.sh").replace("@BINLOOM_VERSION@", env!("CARGO_PKG_VERSION"));
+        include_str!("../binloomw.sh").replace("@BINLOOM_VERSION@", env!("CARGO_PKG_VERSION"));
 
     file.write_all(wrapper.as_bytes())?;
 
@@ -94,8 +94,8 @@ fn generate_binloomw(path: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use crate::init::{add_to_gitignore, generate_binloomw, generate_manifest};
-    use crate::platform::Platform;
+    use super::{add_to_gitignore, generate_binloomw, generate_manifest};
+    use crate::domain::platform::Platform;
     use sha2::{Digest, Sha256};
     use std::os::unix::fs::PermissionsExt;
     use std::{fs, io, process::Command};

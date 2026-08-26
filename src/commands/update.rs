@@ -1,12 +1,14 @@
 use std::{collections::BTreeMap, path::Path};
 
-use crate::resolve::{resolve_binloom, resolve_tool};
 use crate::{
     common::{LOCKFILE, MANIFEST, project_root},
+    domain::{
+        lockfile::Lockfile,
+        manifest::{self, Manifest, Tool},
+        resolve::{resolve_binloom, resolve_tool},
+        sources::Source,
+    },
     download,
-    lockfile::Lockfile,
-    manifest::{self, Manifest, Tool},
-    sources::Source,
 };
 use anyhow::{Context, Result};
 
@@ -176,7 +178,7 @@ fn binloom_source() -> Source {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lockfile::{ChecksumSource, LockedTool, LockedWrapper};
+    use crate::domain::lockfile::{ChecksumSource, LockedTool, LockedWrapper};
 
     #[test]
     fn selects_single_tool_only_for_complete_lockfile() {

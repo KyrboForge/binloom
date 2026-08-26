@@ -1,5 +1,5 @@
+use crate::domain::sources::{github::GithubSource, release::Release};
 use crate::download::Client;
-use crate::sources::{github::GithubSource, release::Release};
 use anyhow::Result;
 use serde::Deserialize;
 use std::fmt::{self, Display, Formatter};

@@ -1,8 +1,8 @@
-use crate::download::Client;
-use crate::sources::{
+use crate::domain::sources::{
     ReleaseProvider,
     release::{Release, ReleaseAsset},
 };
+use crate::download::Client;
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 use std::fmt;

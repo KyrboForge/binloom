@@ -1,6 +1,6 @@
 use crate::{
     common::{MANIFEST, project_root},
-    manifest::Manifest,
+    domain::manifest::Manifest,
 };
 use anyhow::Result;
 

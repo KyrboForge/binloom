@@ -6,12 +6,10 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 
+use super::{install, update};
 use crate::{
     common::{MANIFEST, project_root, validate_tool_name, validate_version},
-    install,
-    manifest::Manifest,
-    sources::Source,
-    update,
+    domain::{manifest::Manifest, sources::Source},
 };
 
 pub fn add(name: &str, source: &str, version: &str, asset: Option<&str>) -> Result<()> {

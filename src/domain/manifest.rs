@@ -1,8 +1,8 @@
 use crate::{
     common::{validate_tool_name, validate_version},
-    sources::Source,
+    domain::{lockfile::Lockfile, sources::Source},
 };
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 use std::{collections::BTreeMap, fs, path::Path};
 use toml_edit::{DocumentMut, Item, Value};
@@ -60,6 +60,24 @@ impl TryFrom<&Path> for Manifest {
     }
 }
 
+impl Manifest {
+    pub(crate) fn ensure_matches_lockfile(&self, lockfile: &Lockfile) -> Result<()> {
+        let matches = self.tools.len() == lockfile.tools.len()
+            && self.tools.iter().all(|(name, tool)| {
+                lockfile.tools.get(name).is_some_and(|locked| {
+                    locked.version == tool.version && locked.source == tool.source.to_string()
+                })
+            });
+
+        ensure!(
+            matches,
+            "binloom.toml and binloom.lock are out of sync; run `binloom update`"
+        );
+
+        Ok(())
+    }
+}
+
 pub fn update_versions<'a>(
     path: &Path,
     binloom: Option<&str>,
@@ -112,6 +130,7 @@ impl Default for UpdateConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::lockfile::LockedTool;
     use std::fs;
 
     #[test]
@@ -232,5 +251,58 @@ version = "../../x"
             fs::write(&path, content).unwrap();
             assert!(Manifest::try_from(path.as_path()).is_err(), "{content}");
         }
+    }
+
+    #[test]
+    fn rejects_manifest_and_lockfile_drift() {
+        let manifest = Manifest {
+            version: 1,
+            binloom: Binloom {
+                version: "0.2.2".to_owned(),
+            },
+            tools: BTreeMap::from([(
+                "tool".to_owned(),
+                Tool {
+                    version: "1.0.0".to_owned(),
+                    source: Source::try_from("github:owner/tool".to_owned()).unwrap(),
+                    asset: None,
+                },
+            )]),
+            update: UpdateConfig::default(),
+        };
+
+        let mut lockfile = Lockfile::default();
+        lockfile.tools.insert(
+            "tool".to_owned(),
+            LockedTool {
+                version: "1.0.0".to_owned(),
+                source: "github:owner/tool".to_owned(),
+                tag: "v1.0.0".to_owned(),
+                artifacts: BTreeMap::new(),
+            },
+        );
+
+        assert!(manifest.ensure_matches_lockfile(&lockfile).is_ok());
+
+        lockfile.tools.get_mut("tool").unwrap().version = "2.0.0".to_owned();
+
+        let error = manifest.ensure_matches_lockfile(&lockfile).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "binloom.toml and binloom.lock are out of sync; run `binloom update`"
+        );
+
+        lockfile.tools.get_mut("tool").unwrap().version = "1.0.0".to_owned();
+        lockfile.tools.insert(
+            "extra".to_owned(),
+            LockedTool {
+                version: "1.0.0".to_owned(),
+                source: "github:owner/extra".to_owned(),
+                tag: "v1.0.0".to_owned(),
+                artifacts: BTreeMap::new(),
+            },
+        );
+
+        assert!(manifest.ensure_matches_lockfile(&lockfile).is_err());
     }
 }

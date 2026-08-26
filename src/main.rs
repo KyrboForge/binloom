@@ -1,23 +1,14 @@
 #[cfg(not(unix))]
 compile_error!("binloom currently supports Unix-like systems only");
-mod add;
+mod commands;
 mod common;
+mod domain;
 mod download;
-mod exec;
 #[cfg(test)]
 mod http_fixture;
-mod init;
-mod install;
-mod list;
-mod lockfile;
-mod manifest;
-mod path;
-mod platform;
-mod resolve;
-mod sources;
-mod update;
 
 use clap::{Parser, Subcommand};
+use commands::{add, exec, init, install, list, path, update};
 use std::ffi::OsString;
 use std::process::ExitCode;
 

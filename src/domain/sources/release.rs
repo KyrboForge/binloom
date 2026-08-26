@@ -1,7 +1,7 @@
 use crate::common::warn;
+use crate::domain::platform::Platform;
 use crate::download;
 use crate::download::Client;
-use crate::platform::Platform;
 use anyhow::{Context, bail};
 use std::collections::{BTreeMap, BTreeSet};
 
