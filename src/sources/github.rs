@@ -120,22 +120,9 @@ impl ReleaseProvider for GithubSource {
     }
 
     fn fetch_latest_release(&self, client: &Client) -> Result<Release> {
-        let url = format!(
-            "https://api.github.com/repos/{}/{}/releases/latest",
-            self.owner, self.repository
-        );
         let token = github_token();
-        let request = authed_request(client, &url, token.as_deref());
 
-        let mut response = request
-            .call()
-            .context("failed to fetch latest GitHub release")?;
-
-        response
-            .body_mut()
-            .read_json::<GithubRelease>()
-            .context("failed to parse latest GitHub release")?
-            .try_into()
+        self.fetch_latest_release_from(client, GITHUB_API_URL, token.as_deref())
     }
 }
 impl GithubReleaseAsset {
@@ -162,6 +149,29 @@ impl GithubReleaseAsset {
 }
 
 impl GithubSource {
+    fn fetch_latest_release_from(
+        &self,
+        client: &Client,
+        api_url: &str,
+        token: Option<&str>,
+    ) -> Result<Release> {
+        let url = format!(
+            "{api_url}/repos/{}/{}/releases/latest",
+            self.owner, self.repository
+        );
+        let request = authed_request(client, &url, token);
+
+        let mut response = request
+            .call()
+            .context("failed to fetch latest GitHub release")?;
+
+        response
+            .body_mut()
+            .read_json::<GithubRelease>()
+            .context("failed to parse latest GitHub release")?
+            .try_into()
+    }
+
     fn fetch_release_from(
         &self,
         client: &Client,
@@ -311,6 +321,37 @@ mod tests {
             requests
                 .iter()
                 .all(|request| request.authorization.as_deref() == Some("Bearer secret-token"))
+        );
+    }
+
+    #[test]
+    fn fetches_latest_release_and_attaches_token() {
+        let server = Server::start(vec![Response {
+            status: 200,
+            body: br#"{
+            "tag_name": "v1.2.3",
+            "published_at": "2026-01-01T00:00:00Z",
+            "assets": []
+        }"#
+            .to_vec(),
+        }]);
+
+        let source = GithubSource::try_from("github:owner/repository".to_owned()).unwrap();
+        let client = download::client();
+
+        let release = source
+            .fetch_latest_release_from(&client, server.url(), Some("secret-token"))
+            .unwrap();
+
+        assert_eq!(release.tag, "v1.2.3");
+
+        let requests = server.requests();
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].path, "/repos/owner/repository/releases/latest");
+        assert_eq!(
+            requests[0].authorization.as_deref(),
+            Some("Bearer secret-token")
         );
     }
 }
