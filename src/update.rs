@@ -66,16 +66,7 @@ fn update_tools(root: &Path, tool_name: Option<&str>, latest: bool) -> Result<()
                 .map(|(name, tool)| (name.as_str(), tool))
                 .collect();
 
-            let existing = if lock_path
-                .try_exists()
-                .context("failed to check binloom.lock")?
-            {
-                Some(Lockfile::try_from(lock_path.as_path())?)
-            } else {
-                None
-            };
-
-            (selected, fresh_lockfile(existing))
+            (selected, Lockfile::default())
         }
     };
 
@@ -133,14 +124,6 @@ fn update_tools(root: &Path, tool_name: Option<&str>, latest: bool) -> Result<()
     Ok(())
 }
 
-fn fresh_lockfile(existing: Option<Lockfile>) -> Lockfile {
-    existing.map_or_else(Lockfile::default, |existing| Lockfile {
-        binloom: existing.binloom,
-        wrapper: existing.wrapper,
-        ..Lockfile::default()
-    })
-}
-
 pub fn update_binloom() -> Result<()> {
     let root = project_root()?;
     let manifest_path = root.join(MANIFEST);
@@ -196,7 +179,7 @@ mod tests {
     use crate::lockfile::{ChecksumSource, LockedTool, LockedWrapper};
 
     #[test]
-    fn preserves_binloom_and_wrapper_when_rebuilding_lockfile() {
+    fn selects_single_tool_only_for_complete_lockfile() {
         let existing = Lockfile {
             wrapper: Some(LockedWrapper {
                 version: "0.1.1".to_owned(),
@@ -216,11 +199,5 @@ mod tests {
         assert_eq!(lock_target(Some(&existing), "lefthook"), Some("lefthook"));
         assert_eq!(lock_target(None, "lefthook"), None);
         assert_eq!(lock_target(Some(&Lockfile::default()), "lefthook"), None);
-
-        let fresh = fresh_lockfile(Some(existing));
-
-        assert_eq!(fresh.binloom.as_ref().unwrap().version, "0.1.0");
-        assert_eq!(fresh.wrapper.as_ref().unwrap().version, "0.1.1");
-        assert!(fresh.tools.is_empty());
     }
 }

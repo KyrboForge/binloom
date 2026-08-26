@@ -18,6 +18,7 @@ pub(crate) fn resolve_tool(
     client: &Client,
 ) -> anyhow::Result<LockedTool> {
     let provider = tool.source.provider();
+    let mut checksum_cache = BTreeMap::new();
 
     let release = match version {
         Some(version) => provider.fetch_release(client, version)?,
@@ -31,6 +32,7 @@ pub(crate) fn resolve_tool(
         &release,
         minimum_age_minutes,
         client,
+        &mut checksum_cache,
     )
 }
 
@@ -54,12 +56,13 @@ fn resolve_checksum(
     client: &Client,
     release: &release::Release,
     asset: &release::ReleaseAsset,
+    checksum_cache: &mut BTreeMap<String, String>,
 ) -> anyhow::Result<(String, ChecksumSource)> {
     if let Some(checksum) = &asset.sha256 {
         return Ok((checksum.clone(), ChecksumSource::Digest));
     }
 
-    if let Some(checksum) = release.checksum_from_sidecar(client, asset)? {
+    if let Some(checksum) = release.checksum_from_sidecar(client, asset, checksum_cache)? {
         return Ok((checksum, ChecksumSource::Sidecar));
     }
 
@@ -90,6 +93,7 @@ fn resolve_release(
     release: &release::Release,
     minimum_age_minutes: u64,
     client: &Client,
+    checksum_cache: &mut BTreeMap<String, String>,
 ) -> anyhow::Result<LockedTool> {
     println!("Found {} for {name}:", release.tag);
     ensure_minimum_release_age(release, minimum_age_minutes, OffsetDateTime::now_utc())?;
@@ -100,7 +104,7 @@ fn resolve_release(
             Some(pattern) => release.find_asset_by_pattern(pattern, &version, platform)?,
             None => release.find_asset(name, platform)?,
         };
-        let (sha256, checksum_source) = resolve_checksum(client, release, asset)?;
+        let (sha256, checksum_source) = resolve_checksum(client, release, asset, checksum_cache)?;
         artifacts.insert(
             platform.to_string(),
             LockedArtifact {
@@ -161,6 +165,7 @@ fn resolve_binloom_release(
     minimum_age_minutes: u64,
     client: &Client,
 ) -> anyhow::Result<(LockedTool, LockedWrapper)> {
+    let mut checksum_cache = BTreeMap::new();
     let binloom = resolve_release(
         "binloom",
         source,
@@ -168,9 +173,10 @@ fn resolve_binloom_release(
         release,
         minimum_age_minutes,
         client,
+        &mut checksum_cache,
     )?;
     let asset = release.find_asset_by_name("binloomw")?;
-    let (sha256, checksum_source) = resolve_checksum(client, release, asset)?;
+    let (sha256, checksum_source) = resolve_checksum(client, release, asset, &mut checksum_cache)?;
 
     let wrapper = LockedWrapper {
         version: binloom.version.clone(),
@@ -186,10 +192,19 @@ fn resolve_binloom_release(
 mod tests {
     use super::*;
     use crate::http_fixture::{Response, Server};
+    use crate::sources::release::{Release, ReleaseAsset};
+
+    fn asset(name: &str) -> ReleaseAsset {
+        ReleaseAsset {
+            name: name.to_owned(),
+            download_url: format!("https://example.com/{name}"),
+            sha256: None,
+        }
+    }
 
     #[test]
     fn enforces_minimum_release_age() {
-        let release = release::Release {
+        let release = Release {
             tag: "v1.0.0".to_owned(),
             published_at: Some("2026-01-01T12:00:00Z".to_owned()),
             assets: vec![],
@@ -220,18 +235,20 @@ mod tests {
     #[test]
     fn records_embedded_digest_provenance() {
         let checksum = "a".repeat(64);
-        let release = release::Release {
+        let release = Release {
             tag: "v1.0.0".to_owned(),
             published_at: None,
-            assets: vec![release::ReleaseAsset {
+            assets: vec![ReleaseAsset {
                 name: "tool.gz".to_owned(),
                 download_url: "https://example.com/tool.gz".to_owned(),
                 sha256: Some(checksum.clone()),
             }],
         };
         let client = download::client();
+        let mut checksum_cache = BTreeMap::new();
 
-        let resolved = resolve_checksum(&client, &release, &release.assets[0]).unwrap();
+        let resolved =
+            resolve_checksum(&client, &release, &release.assets[0], &mut checksum_cache).unwrap();
 
         assert_eq!(resolved, (checksum, ChecksumSource::Digest));
     }
@@ -243,17 +260,18 @@ mod tests {
             status: 200,
             body: format!("{checksum}  tool.gz\n").into_bytes(),
         }]);
+        let mut checksum_cache = BTreeMap::new();
 
-        let release = release::Release {
+        let release = Release {
             tag: "v1.0.0".to_owned(),
             published_at: None,
             assets: vec![
-                release::ReleaseAsset {
+                ReleaseAsset {
                     name: "tool.gz".to_owned(),
                     download_url: format!("{}/tool.gz", server.url()),
                     sha256: None,
                 },
-                release::ReleaseAsset {
+                ReleaseAsset {
                     name: "tool.gz.sha256".to_owned(),
                     download_url: format!("{}/tool.gz.sha256", server.url()),
                     sha256: None,
@@ -262,7 +280,8 @@ mod tests {
         };
         let client = download::client();
 
-        let resolved = resolve_checksum(&client, &release, &release.assets[0]).unwrap();
+        let resolved =
+            resolve_checksum(&client, &release, &release.assets[0], &mut checksum_cache).unwrap();
 
         assert_eq!(resolved, (checksum, ChecksumSource::Sidecar));
         assert_eq!(server.requests()[0].path, "/tool.gz.sha256");
@@ -275,10 +294,12 @@ mod tests {
             body: b"hello".to_vec(),
         }]);
 
-        let release = release::Release {
+        let mut checksum_cache = BTreeMap::new();
+
+        let release = Release {
             tag: "v1.0.0".to_owned(),
             published_at: None,
-            assets: vec![release::ReleaseAsset {
+            assets: vec![ReleaseAsset {
                 name: "tool.gz".to_owned(),
                 download_url: format!("{}/tool.gz", server.url()),
                 sha256: None,
@@ -286,7 +307,8 @@ mod tests {
         };
         let client = download::client();
 
-        let resolved = resolve_checksum(&client, &release, &release.assets[0]).unwrap();
+        let resolved =
+            resolve_checksum(&client, &release, &release.assets[0], &mut checksum_cache).unwrap();
 
         assert_eq!(
             resolved,
@@ -296,5 +318,53 @@ mod tests {
             )
         );
         assert_eq!(server.requests()[0].path, "/tool.gz");
+    }
+
+    #[test]
+    fn reuses_global_checksum_sidecar() {
+        let first_checksum = "a".repeat(64);
+        let second_checksum = "b".repeat(64);
+
+        let server = Server::start(vec![Response {
+            status: 200,
+            body: format!(
+                "{first_checksum}  tool_linux_x86_64.gz\n\
+             {second_checksum}  tool_macos_aarch64.gz\n"
+            )
+            .into_bytes(),
+        }]);
+
+        let release = Release {
+            tag: "v1.0.0".to_owned(),
+            published_at: None,
+            assets: vec![
+                asset("tool_linux_x86_64.gz"),
+                asset("tool_macos_aarch64.gz"),
+                ReleaseAsset {
+                    name: "SHA256SUMS".to_owned(),
+                    download_url: format!("{}/SHA256SUMS", server.url()),
+                    sha256: None,
+                },
+            ],
+        };
+
+        let client = download::client();
+        let mut checksum_cache = BTreeMap::new();
+
+        assert_eq!(
+            release
+                .checksum_from_sidecar(&client, &release.assets[0], &mut checksum_cache)
+                .unwrap(),
+            Some(first_checksum)
+        );
+
+        assert_eq!(
+            release
+                .checksum_from_sidecar(&client, &release.assets[1], &mut checksum_cache)
+                .unwrap(),
+            Some(second_checksum)
+        );
+
+        assert_eq!(server.requests().len(), 1);
     }
 }

@@ -3,6 +3,7 @@ use crate::download;
 use crate::download::Client;
 use crate::platform::Platform;
 use anyhow::{Context, bail};
+use std::collections::BTreeMap;
 
 #[derive(Debug)]
 pub struct Release {
@@ -147,6 +148,7 @@ impl Release {
         &self,
         client: &Client,
         asset: &ReleaseAsset,
+        cache: &mut BTreeMap<String, String>,
     ) -> anyhow::Result<Option<String>> {
         let exact_names = [
             format!("{}.sha256", asset.name),
@@ -168,9 +170,16 @@ impl Release {
                     continue;
                 }
 
-                let content = download::text_url(client, &checksum_asset.download_url)?;
+                let url = &checksum_asset.download_url;
 
-                if let Some(checksum) = Self::checksum_from_text(&content, &asset.name, is_exact) {
+                if !cache.contains_key(url) {
+                    let content = download::text_url(client, url)?;
+                    cache.insert(url.clone(), content);
+                }
+
+                let content = cache.get(url).expect("checksum sidecar was just cached");
+
+                if let Some(checksum) = Self::checksum_from_text(content, &asset.name, is_exact) {
                     return Ok(Some(checksum));
                 }
             }
@@ -368,7 +377,7 @@ mod tests {
 
         assert_eq!(
             release
-                .checksum_from_sidecar(&client, &release.assets[0])
+                .checksum_from_sidecar(&client, &release.assets[0], &mut BTreeMap::new())
                 .unwrap(),
             None
         );
