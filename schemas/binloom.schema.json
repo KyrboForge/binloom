@@ -55,7 +55,7 @@
           "asset": {
             "type": "string",
             "minLength": 1,
-            "description": "Optional release asset pattern."
+            "description": "Optional release asset pattern. Supports {version}, {os}, {arch}, and {target}."
           }
         }
       }

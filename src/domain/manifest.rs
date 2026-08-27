@@ -217,6 +217,7 @@ source = "github:evilmartians/lefthook"
         assert!(content.contains("version = \"0.1.1\" # wrapper"));
         assert!(content.contains("version = \"2.1.11\" # hooks"));
     }
+
     #[test]
     fn rejects_unsafe_names_and_versions() {
         let directory = tempfile::tempdir().unwrap();

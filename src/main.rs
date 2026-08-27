@@ -60,13 +60,13 @@ enum Command {
             long,
             help = "Version of the tool, example = \"v2.1.10\" or \"2.1.10\""
         )]
+        version: String,
         #[arg(
             short,
             long,
             help = "Optional release asset pattern, for example tool_{version}_{os}_{arch}.gz"
         )]
         asset: Option<String>,
-        version: String,
     },
 }
 
@@ -99,5 +99,36 @@ fn main() -> ExitCode {
             eprintln!("error: {error:#}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_add_patterns() {
+        let cli = Cli::try_parse_from([
+            "binloom",
+            "add",
+            "cargo-nextest",
+            "--source",
+            "github:nextest-rs/nextest",
+            "--version",
+            "0.9.143",
+            "--asset",
+            "cargo-nextest-{version}-{target}.tar.gz",
+        ])
+        .unwrap();
+
+        let Command::Add { version, asset, .. } = cli.command else {
+            panic!("expected add command");
+        };
+
+        assert_eq!(version, "0.9.143");
+        assert_eq!(
+            asset.as_deref(),
+            Some("cargo-nextest-{version}-{target}.tar.gz")
+        );
     }
 }

@@ -12,6 +12,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime};
 
+struct ReleaseRequest<'a> {
+    name: &'a str,
+    source: &'a Source,
+    asset_pattern: Option<&'a str>,
+}
+
 pub(crate) fn resolve_tool(
     name: &str,
     tool: &Tool,
@@ -23,14 +29,16 @@ pub(crate) fn resolve_tool(
     let mut checksum_cache = BTreeMap::new();
 
     let release = match version {
-        Some(version) => provider.fetch_release(client, version)?,
+        Some(version) => provider.fetch_release(client, name, version)?,
         None => provider.fetch_latest_release(client)?,
     };
 
     resolve_release(
-        name,
-        &tool.source,
-        tool.asset.as_deref(),
+        ReleaseRequest {
+            name,
+            source: &tool.source,
+            asset_pattern: tool.asset.as_deref(),
+        },
         &release,
         minimum_age_minutes,
         client,
@@ -47,7 +55,7 @@ pub(crate) fn resolve_binloom(
     let provider = source.provider();
 
     let release = match version {
-        Some(version) => provider.fetch_release(client, version)?,
+        Some(version) => provider.fetch_release(client, "binloom", version)?,
         None => provider.fetch_latest_release(client)?,
     };
 
@@ -79,8 +87,11 @@ fn resolve_checksum(
     ))
 }
 
-fn version_from_tag(tag: &str) -> anyhow::Result<String> {
-    let version = tag.strip_prefix('v').unwrap_or(tag);
+fn version_from_tag(tag: &str, name: &str) -> anyhow::Result<String> {
+    let version = tag
+        .strip_prefix('v')
+        .or_else(|| tag.strip_prefix(name)?.strip_prefix('-'))
+        .unwrap_or(tag);
 
     validate_version(version)
         .with_context(|| format!("release tag {tag} contains an unsafe version"))?;
@@ -89,23 +100,21 @@ fn version_from_tag(tag: &str) -> anyhow::Result<String> {
 }
 
 fn resolve_release(
-    name: &str,
-    source: &Source,
-    asset_pattern: Option<&str>,
+    request: ReleaseRequest<'_>,
     release: &release::Release,
     minimum_age_minutes: u64,
     client: &Client,
     checksum_cache: &mut BTreeMap<String, String>,
 ) -> anyhow::Result<LockedTool> {
-    println!("Found {} for {name}:", release.tag);
+    println!("Found {} for {}:", release.tag, request.name);
     ensure_minimum_release_age(release, minimum_age_minutes, OffsetDateTime::now_utc())?;
-    let version = version_from_tag(&release.tag)?;
+    let version = version_from_tag(&release.tag, request.name)?;
     let mut artifacts = BTreeMap::new();
     let mut emitted_warnings = BTreeSet::new();
     for platform in Platform::ALL {
-        let asset = match asset_pattern {
+        let asset = match request.asset_pattern {
             Some(pattern) => release.find_asset_by_pattern(pattern, &version, platform)?,
-            None => release.find_asset(name, platform, &mut emitted_warnings)?,
+            None => release.find_asset(request.name, platform, &mut emitted_warnings)?,
         };
         let (sha256, checksum_source) = resolve_checksum(client, release, asset, checksum_cache)?;
         artifacts.insert(
@@ -122,7 +131,7 @@ fn resolve_release(
 
     Ok(LockedTool {
         version,
-        source: source.to_string(),
+        source: request.source.to_string(),
         tag: release.tag.clone(),
         artifacts,
     })
@@ -170,9 +179,11 @@ fn resolve_binloom_release(
 ) -> anyhow::Result<(LockedTool, LockedWrapper)> {
     let mut checksum_cache = BTreeMap::new();
     let binloom = resolve_release(
-        "binloom",
-        source,
-        None,
+        ReleaseRequest {
+            name: "binloom",
+            source,
+            asset_pattern: None,
+        },
         release,
         minimum_age_minutes,
         client,
@@ -227,12 +238,20 @@ mod tests {
 
     #[test]
     fn rejects_unsafe_release_tags() {
-        assert_eq!(version_from_tag("v1.2.3").unwrap(), "1.2.3");
-        assert_eq!(version_from_tag("1.2.3").unwrap(), "1.2.3");
+        assert_eq!(version_from_tag("v1.2.3", "tool").unwrap(), "1.2.3");
+        assert_eq!(version_from_tag("1.2.3", "tool").unwrap(), "1.2.3");
 
         for tag in ["v/tmp/x", "v../../x", r"v..\..\x", "v.hidden"] {
-            assert!(version_from_tag(tag).is_err(), "{tag:?}");
+            assert!(version_from_tag(tag, "tool").is_err(), "{tag:?}");
         }
+    }
+
+    #[test]
+    fn resolves_version_from_tool_prefixed_tag() {
+        assert_eq!(
+            version_from_tag("cargo-nextest-0.9.143", "cargo-nextest").unwrap(),
+            "0.9.143"
+        );
     }
 
     #[test]

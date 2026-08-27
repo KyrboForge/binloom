@@ -153,6 +153,22 @@ source = "github:owner/example"
 asset = "example_{version}_{os}_{arch}.gz"
 ```
 
+Binloom also tries tool-prefixed tags such as `cargo-nextest-0.9.143`.
+`{target}` expands to Binloom's portable target for each platform. For
+example, cargo-nextest can be pinned without a global `cargo install`:
+
+```toml
+[tools.cargo-nextest]
+version = "0.9.143"
+source = "github:nextest-rs/nextest"
+asset = "cargo-nextest-{version}-{target}.tar.gz"
+```
+
+```sh
+./binloomw install
+./binloomw exec cargo nextest run
+```
+
 Updates ignore releases younger than 24 hours by default. Repositories can
 change that safety window:
 
@@ -196,8 +212,9 @@ itself atomically from the locked release asset and restarts.
 ## 🎯 Scope
 
 Binloom currently supports public GitHub and GitLab Releases on macOS and
-Linux for ARM64 and x86-64. Assets may be raw executables or single
-gzip-compressed executables.
+Linux for ARM64 and x86-64. Assets may be raw executables, single
+gzip-compressed executables, or `.tar.gz` archives containing exactly one
+regular file whose name matches the configured tool name.
 
 It is not a language package manager, runtime manager, daemon, GUI, or remote
 package registry. See the [MVP design](docs/design.md) for the detailed

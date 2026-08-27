@@ -11,9 +11,21 @@ use release::Release;
 pub(crate) use {github::GithubSource, gitlab::GitlabSource};
 
 pub(crate) trait ReleaseProvider {
-    fn fetch_release(&self, client: &Client, version: &str) -> Result<Release>;
+    fn fetch_release(&self, client: &Client, name: &str, version: &str) -> Result<Release>;
 
     fn fetch_latest_release(&self, client: &Client) -> Result<Release>;
+}
+
+fn release_tags(name: &str, version: &str) -> Vec<String> {
+    if version.starts_with('v') {
+        vec![version.to_owned()]
+    } else {
+        vec![
+            format!("v{version}"),
+            version.to_owned(),
+            format!("{name}-{version}"),
+        ]
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,5 +97,13 @@ mod tests {
     fn parses_and_displays_gitlab_source() {
         let source = Source::try_from("gitlab:group/project".to_owned()).unwrap();
         assert_eq!(source.to_string(), "gitlab:group/project");
+    }
+
+    #[test]
+    fn builds_common_release_tags() {
+        assert_eq!(
+            release_tags("cargo-nextest", "0.9.143"),
+            ["v0.9.143", "0.9.143", "cargo-nextest-0.9.143"]
+        );
     }
 }

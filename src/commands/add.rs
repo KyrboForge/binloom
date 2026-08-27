@@ -31,7 +31,6 @@ fn write_tool(
 ) -> Result<()> {
     validate_tool_name(name)?;
     validate_version(version)?;
-
     let manifest = Manifest::try_from(path)?;
     ensure!(
         !manifest.tools.contains_key(name),

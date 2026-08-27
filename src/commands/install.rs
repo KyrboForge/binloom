@@ -78,8 +78,13 @@ fn install_from(root: &Path, client: &download::Client) -> Result<()> {
         let mut executable = tempfile::NamedTempFile::new_in(&directory)?;
         let downloaded_file = downloaded.reopen()?;
 
-        unpack(artifact.format, downloaded_file, executable.as_file_mut())
-            .with_context(|| format!("failed to unpack {}", artifact.asset))?;
+        unpack(
+            artifact.format,
+            downloaded_file,
+            executable.as_file_mut(),
+            name,
+        )
+        .with_context(|| format!("failed to unpack {}", artifact.asset))?;
 
         #[cfg(unix)]
         {
@@ -133,10 +138,35 @@ fn unpack(
     format: ArtifactFormat,
     mut source: impl Read,
     mut destination: impl Write,
+    executable_name: &str,
 ) -> io::Result<u64> {
     match format {
         ArtifactFormat::Raw => io::copy(&mut source, &mut destination),
         ArtifactFormat::Gz => io::copy(&mut GzDecoder::new(source), &mut destination),
+        ArtifactFormat::TarGz => {
+            let mut archive = tar::Archive::new(GzDecoder::new(source));
+            let mut copied = None;
+
+            for entry in archive.entries()? {
+                let mut entry = entry?;
+                if !entry.header().entry_type().is_file()
+                    || entry.path()?.file_name() != Some(executable_name.as_ref())
+                {
+                    continue;
+                }
+                if copied.is_some() {
+                    return Err(io::Error::other(format!(
+                        "archive contains multiple files named {executable_name}"
+                    )));
+                }
+
+                copied = Some(io::copy(&mut entry, &mut destination)?);
+            }
+
+            copied.ok_or_else(|| {
+                io::Error::other(format!("archive contains no file named {executable_name}"))
+            })
+        }
     }
 }
 
@@ -223,7 +253,7 @@ source = "github:owner/tool"
         let input = b"hello";
 
         let mut raw = Vec::new();
-        unpack(ArtifactFormat::Raw, &input[..], &mut raw).unwrap();
+        unpack(ArtifactFormat::Raw, &input[..], &mut raw, "tool").unwrap();
         assert_eq!(raw, input);
 
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
@@ -231,8 +261,66 @@ source = "github:owner/tool"
         let compressed = encoder.finish().unwrap();
 
         let mut gzip = Vec::new();
-        unpack(ArtifactFormat::Gz, &compressed[..], &mut gzip).unwrap();
+        unpack(ArtifactFormat::Gz, &compressed[..], &mut gzip, "tool").unwrap();
         assert_eq!(gzip, input);
+    }
+
+    #[test]
+    fn extracts_named_executable_from_tar_gzip() {
+        let mut archive = tar::Builder::new(Vec::new());
+        let binary = b"nextest binary";
+        let mut header = tar::Header::new_gnu();
+        header.set_path("cargo-nextest/cargo-nextest").unwrap();
+        header.set_size(binary.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        archive.append(&header, &binary[..]).unwrap();
+        let archive = archive.into_inner().unwrap();
+
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&archive).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let mut extracted = Vec::new();
+
+        unpack(
+            ArtifactFormat::TarGz,
+            &compressed[..],
+            &mut extracted,
+            "cargo-nextest",
+        )
+        .unwrap();
+
+        assert_eq!(extracted, binary);
+    }
+
+    #[test]
+    fn rejects_missing_or_duplicate_tar_executables() {
+        fn compressed_archive(paths: &[&str]) -> Vec<u8> {
+            let mut archive = tar::Builder::new(Vec::new());
+            for path in paths {
+                let mut header = tar::Header::new_gnu();
+                header.set_path(path).unwrap();
+                header.set_size(1);
+                header.set_mode(0o755);
+                header.set_cksum();
+                archive.append(&header, &b"x"[..]).unwrap();
+            }
+            let archive = archive.into_inner().unwrap();
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+            encoder.write_all(&archive).unwrap();
+            encoder.finish().unwrap()
+        }
+
+        let missing = compressed_archive(&["README.md"]);
+        let error = unpack(ArtifactFormat::TarGz, &missing[..], Vec::new(), "tool").unwrap_err();
+        assert_eq!(error.to_string(), "archive contains no file named tool");
+
+        let duplicate = compressed_archive(&["one/tool", "two/tool"]);
+        let error = unpack(ArtifactFormat::TarGz, &duplicate[..], Vec::new(), "tool").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "archive contains multiple files named tool"
+        );
     }
 
     #[test]

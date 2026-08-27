@@ -1,6 +1,7 @@
 use crate::domain::sources::{
     ReleaseProvider,
     release::{Release, ReleaseAsset},
+    release_tags,
 };
 use crate::download::Client;
 use anyhow::{Context, Result, bail, ensure};
@@ -114,10 +115,10 @@ fn authed_request(
 }
 
 impl ReleaseProvider for GithubSource {
-    fn fetch_release(&self, client: &Client, version: &str) -> Result<Release> {
+    fn fetch_release(&self, client: &Client, name: &str, version: &str) -> Result<Release> {
         let token = github_token();
 
-        self.fetch_release_from(client, version, GITHUB_API_URL, token.as_deref())
+        self.fetch_release_from(client, name, version, GITHUB_API_URL, token.as_deref())
     }
 
     fn fetch_latest_release(&self, client: &Client) -> Result<Release> {
@@ -177,17 +178,12 @@ impl GithubSource {
     fn fetch_release_from(
         &self,
         client: &Client,
+        name: &str,
         version: &str,
         api_url: &str,
         token: Option<&str>,
     ) -> Result<Release> {
-        let tags = if version.starts_with('v') {
-            vec![version.to_owned()]
-        } else {
-            vec![format!("v{version}"), version.to_owned()]
-        };
-
-        for tag in tags {
+        for tag in release_tags(name, version) {
             let url = format!(
                 "{api_url}/repos/{}/{}/releases/tags/{tag}",
                 self.owner, self.repository
@@ -304,7 +300,7 @@ mod tests {
         let client = download::client();
 
         let release = source
-            .fetch_release_from(&client, "1.2.3", server.url(), Some("secret-token"))
+            .fetch_release_from(&client, "tool", "1.2.3", server.url(), Some("secret-token"))
             .unwrap();
 
         assert_eq!(release.tag, "1.2.3");

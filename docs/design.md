@@ -100,8 +100,18 @@ source = "github:owner/example"
 asset = "example_{version}_{os}_{arch}.gz"
 ```
 
-`{os}` and `{arch}` use Binloom's built-in alias sets, so users do not repeat
-platform mappings in the manifest.
+`{os}` and `{arch}` use Binloom's built-in alias sets. `{target}` expands to a
+portable release target such as `x86_64-unknown-linux-musl` or
+`universal-apple-darwin`.
+
+Binloom tries `v{version}`, `{version}`, and `{tool}-{version}` release tags:
+
+```toml
+[tools.cargo-nextest]
+version = "0.9.143"
+source = "github:nextest-rs/nextest"
+asset = "cargo-nextest-{version}-{target}.tar.gz"
+```
 
 Updates reject releases younger than 24 hours by default:
 
@@ -228,7 +238,10 @@ the committed lockfile.
 - An existing executable at the exact locked path makes installation
   idempotent.
 - Resolution never executes downloaded content.
-- Unsupported archive formats fail instead of extracting paths or links.
+- `.tar.gz` installation streams the single regular file whose basename
+  matches the tool name. Missing or duplicate matches fail; paths and links
+  are never extracted.
+- Other archive formats fail instead of extracting paths or links.
 
 ## Language independence
 

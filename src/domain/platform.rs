@@ -34,6 +34,14 @@ impl Platform {
             Self::MacosX86_64 | Self::LinuxX86_64 => &["x86_64", "amd64"],
         }
     }
+
+    pub(crate) const fn target(self) -> &'static str {
+        match self {
+            Self::MacosAarch64 | Self::MacosX86_64 => "universal-apple-darwin",
+            Self::LinuxAarch64 => "aarch64-unknown-linux-musl",
+            Self::LinuxX86_64 => "x86_64-unknown-linux-musl",
+        }
+    }
 }
 
 impl TryFrom<(&str, &str)> for Platform {
@@ -85,5 +93,16 @@ mod tests {
         let error = Platform::try_from(("windows", "x86_64")).unwrap_err();
 
         assert_eq!(error.to_string(), "unsupported platform: windows-x86_64");
+    }
+
+    #[test]
+    fn maps_platforms_to_portable_release_targets() {
+        assert_eq!(Platform::MacosAarch64.target(), "universal-apple-darwin");
+        assert_eq!(Platform::MacosX86_64.target(), "universal-apple-darwin");
+        assert_eq!(
+            Platform::LinuxAarch64.target(),
+            "aarch64-unknown-linux-musl"
+        );
+        assert_eq!(Platform::LinuxX86_64.target(), "x86_64-unknown-linux-musl");
     }
 }

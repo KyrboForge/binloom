@@ -55,10 +55,11 @@ pub(crate) struct LockedArtifact {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "kebab-case")]
 pub(crate) enum ArtifactFormat {
     Raw,
     Gz,
+    TarGz,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -193,14 +194,16 @@ impl TryFrom<&str> for ArtifactFormat {
                 .is_some_and(|ending| ending.eq_ignore_ascii_case(suffix))
         };
 
-        if [".tar.gz", ".tgz", ".zip", ".tar.xz", ".tar.zst"]
+        if [".tgz", ".zip", ".tar.xz", ".tar.zst"]
             .iter()
             .any(|suffix| ends_with(suffix))
         {
             bail!("unsupported asset format: {asset}");
         }
 
-        if ends_with(".gz") {
+        if ends_with(".tar.gz") {
+            Ok(Self::TarGz)
+        } else if ends_with(".gz") {
             Ok(Self::Gz)
         } else {
             Ok(Self::Raw)
@@ -396,6 +399,10 @@ artifacts = {}
     #[test]
     fn detects_artifact_formats_case_insensitively() {
         assert!(matches!(
+            ArtifactFormat::try_from("tool.TAR.GZ").unwrap(),
+            ArtifactFormat::TarGz
+        ));
+        assert!(matches!(
             ArtifactFormat::try_from("tool.GZ").unwrap(),
             ArtifactFormat::Gz
         ));
@@ -403,7 +410,6 @@ artifacts = {}
             ArtifactFormat::try_from("tool").unwrap(),
             ArtifactFormat::Raw
         ));
-        assert!(ArtifactFormat::try_from("tool.TAR.GZ").is_err());
         assert!(ArtifactFormat::try_from("tool.ZIP").is_err());
     }
 }
