@@ -192,7 +192,8 @@ mod tests {
             binloom: Some(LockedTool {
                 version: "0.1.0".to_owned(),
                 source: "github:KyrboForge/binloom".to_owned(),
-                tag: "v0.1.0".to_owned(),
+                tag: Some("v0.1.0".to_owned()),
+                sha256: None,
                 artifacts: BTreeMap::new(),
             }),
             ..Lockfile::default()

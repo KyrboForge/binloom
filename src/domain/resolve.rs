@@ -25,7 +25,34 @@ pub(crate) fn resolve_tool(
     minimum_age_minutes: u64,
     client: &Client,
 ) -> anyhow::Result<LockedTool> {
-    let provider = tool.source.provider();
+    if let Source::Cargo(source) = &tool.source {
+        anyhow::ensure!(
+            tool.asset.is_none(),
+            "Cargo tools do not support release asset patterns"
+        );
+
+        let resolved = source.resolve(client, version)?;
+        let subject = format!("{source}@{}", resolved.version);
+
+        ensure_minimum_age(
+            &subject,
+            &resolved.published_at,
+            minimum_age_minutes,
+            OffsetDateTime::now_utc(),
+        )?;
+
+        println!("Found {} for {name}:", resolved.version);
+
+        return Ok(LockedTool {
+            version: resolved.version,
+            source: source.to_string(),
+            tag: None,
+            sha256: Some(resolved.checksum),
+            artifacts: BTreeMap::new(),
+        });
+    }
+
+    let provider = tool.source.release_provider()?;
     let mut checksum_cache = BTreeMap::new();
 
     let release = match version {
@@ -52,7 +79,7 @@ pub(crate) fn resolve_binloom(
     minimum_age_minutes: u64,
     client: &Client,
 ) -> anyhow::Result<(LockedTool, LockedWrapper)> {
-    let provider = source.provider();
+    let provider = source.release_provider()?;
 
     let release = match version {
         Some(version) => provider.fetch_release(client, "binloom", version)?,
@@ -132,23 +159,20 @@ fn resolve_release(
     Ok(LockedTool {
         version,
         source: request.source.to_string(),
-        tag: release.tag.clone(),
+        tag: Some(release.tag.clone()),
+        sha256: None,
         artifacts,
     })
 }
 
-fn ensure_minimum_release_age(
-    release: &release::Release,
+fn ensure_minimum_age(
+    subject: &str,
+    published_at: &str,
     minimum_minutes: u64,
     now: OffsetDateTime,
 ) -> anyhow::Result<()> {
-    let published_at = release
-        .published_at
-        .as_deref()
-        .with_context(|| format!("release {} has no publication date", release.tag))?;
-
     let published_at = OffsetDateTime::parse(published_at, &Rfc3339)
-        .with_context(|| format!("release {} has invalid publication date", release.tag))?;
+        .with_context(|| format!("{subject} has invalid publication date"))?;
 
     let minimum_seconds = minimum_minutes
         .checked_mul(60)
@@ -162,13 +186,24 @@ fn ensure_minimum_release_age(
         let remaining_seconds = (minimum_age - actual_age).whole_seconds();
         let remaining_minutes = (remaining_seconds + 59) / 60;
 
-        bail!(
-            "release {} is too new; wait {remaining_minutes} more minute(s)",
-            release.tag
-        );
+        bail!("{subject} is too new; wait {remaining_minutes} more minute(s)");
     }
 
     Ok(())
+}
+
+fn ensure_minimum_release_age(
+    release: &release::Release,
+    minimum_minutes: u64,
+    now: OffsetDateTime,
+) -> anyhow::Result<()> {
+    let subject = format!("release {}", release.tag);
+    let published_at = release
+        .published_at
+        .as_deref()
+        .with_context(|| format!("{subject} has no publication date"))?;
+
+    ensure_minimum_age(&subject, published_at, minimum_minutes, now)
 }
 
 fn resolve_binloom_release(
@@ -205,6 +240,7 @@ fn resolve_binloom_release(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::sources::CargoSource;
     use crate::domain::sources::release::{Release, ReleaseAsset};
     use crate::http_fixture::{Response, Server};
 
@@ -388,5 +424,55 @@ mod tests {
         );
 
         assert_eq!(server.requests().len(), 1);
+    }
+
+    #[test]
+    fn resolves_cargo_package_into_lock_entry() {
+        let checksum = "a".repeat(64);
+        let server = Server::start(vec![Response {
+            status: 200,
+            body: format!(
+                r#"{{
+                "crate": {{
+                    "max_version": "1.2.3",
+                    "max_stable_version": "1.2.3"
+                }},
+                "versions": [{{
+                    "num": "1.2.3",
+                    "checksum": "{checksum}",
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "yanked": false
+                }}]
+            }}"#
+            )
+            .into_bytes(),
+        }]);
+
+        let source = CargoSource::try_from("cargo:tool".to_owned()).unwrap();
+        let resolved = source
+            .resolve_from(&download::client(), Some("1.2.3"), server.url())
+            .unwrap();
+
+        ensure_minimum_age(
+            "cargo:tool@1.2.3",
+            &resolved.published_at,
+            0,
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+
+        let locked = LockedTool {
+            version: resolved.version,
+            source: source.to_string(),
+            tag: None,
+            sha256: Some(resolved.checksum),
+            artifacts: BTreeMap::new(),
+        };
+
+        assert_eq!(locked.version, "1.2.3");
+        assert_eq!(locked.source, "cargo:tool");
+        assert_eq!(locked.sha256.as_deref(), Some(checksum.as_str()));
+        assert!(locked.tag.is_none());
+        assert!(locked.artifacts.is_empty());
     }
 }

@@ -2,9 +2,10 @@ use super::update;
 use crate::{
     common::{LOCKFILE, MANIFEST, TOOLS_DIR, project_root},
     domain::{
-        lockfile::{ArtifactFormat, Lockfile},
+        lockfile::{ArtifactFormat, LockedTool, Lockfile},
         manifest::Manifest,
         platform::Platform,
+        sources::{CargoSource, Source},
     },
     download,
 };
@@ -14,6 +15,7 @@ use std::{
     fs,
     io::{self, Read, Write},
     path::Path,
+    process::{Command, Stdio},
 };
 
 pub(crate) fn install() -> Result<()> {
@@ -46,6 +48,12 @@ fn install_from(root: &Path, client: &download::Client) -> Result<()> {
     let platform_key = platform.to_string();
 
     for (name, tool) in &lockfile.tools {
+        let source = Source::try_from(tool.source.clone()).map_err(anyhow::Error::msg)?;
+
+        if let Source::Cargo(source) = source {
+            install_cargo(root, name, tool, &source, client)?;
+            continue;
+        }
         let artifact = tool
             .artifacts
             .get(&platform_key)
@@ -109,6 +117,116 @@ fn install_from(root: &Path, client: &download::Client) -> Result<()> {
 
         println!("Installed {name} {}", tool.version);
     }
+
+    Ok(())
+}
+
+fn install_cargo(
+    root: &Path,
+    name: &str,
+    tool: &LockedTool,
+    source: &CargoSource,
+    client: &download::Client,
+) -> Result<()> {
+    let expected_sha256 = tool
+        .sha256
+        .as_deref()
+        .context("Cargo lock entry is missing SHA-256")?;
+
+    let directory = root.join(TOOLS_DIR).join(name).join(&tool.version);
+    let destination = directory.join(name);
+    let checksum_stamp = directory.join(".crate-sha256");
+
+    fs::create_dir_all(&directory)
+        .with_context(|| format!("failed to create {}", directory.display()))?;
+
+    if cached_artifact_matches(&destination, &checksum_stamp, expected_sha256)? {
+        println!("Already installed {name} {}", tool.version);
+        link_tool(root, name, &tool.version)?;
+        return Ok(());
+    }
+
+    ensure_cargo_toolchain()?;
+
+    let mut archive = tempfile::NamedTempFile::new_in(&directory)?;
+    let actual_sha256 =
+        download::download_to(client, &source.download_url(&tool.version), &mut archive)?;
+
+    ensure!(
+        actual_sha256 == expected_sha256,
+        "checksum mismatch for {name}: expected {expected_sha256}, got {actual_sha256}"
+    );
+
+    let extracted = tempfile::tempdir_in(&directory)?;
+    let archive_file = archive.reopen()?;
+
+    tar::Archive::new(GzDecoder::new(archive_file))
+        .unpack(extracted.path())
+        .context("failed to unpack Cargo package")?;
+
+    let package_root = extracted
+        .path()
+        .join(format!("{}-{}", source.package(), tool.version));
+
+    ensure!(
+        package_root.join("Cargo.toml").is_file(),
+        "Cargo package archive has no expected Cargo.toml"
+    );
+
+    let install_root = tempfile::tempdir_in(&directory)?;
+
+    let status = Command::new("cargo")
+        .arg("install")
+        .arg("--path")
+        .arg(&package_root)
+        .arg("--locked")
+        .arg("--root")
+        .arg(install_root.path())
+        .status()
+        .context("failed to run cargo install")?;
+
+    ensure!(
+        status.success(),
+        "cargo install failed for {}@{}",
+        source.package(),
+        tool.version
+    );
+
+    let installed = install_root.path().join("bin").join(name);
+
+    ensure!(
+        installed.is_file(),
+        "Cargo package {} did not install binary {name}",
+        source.package()
+    );
+
+    fs::rename(&installed, &destination)
+        .with_context(|| format!("failed to install {}", destination.display()))?;
+
+    fs::write(&checksum_stamp, format!("{expected_sha256}\n"))
+        .with_context(|| format!("failed to write {}", checksum_stamp.display()))?;
+
+    link_tool(root, name, &tool.version)?;
+
+    println!("Installed {name} {}", tool.version);
+
+    Ok(())
+}
+fn command_available(command: &str) -> bool {
+    Command::new(command)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn ensure_cargo_toolchain() -> Result<()> {
+    ensure!(
+        command_available("cargo") && command_available("rustc"),
+        "Cargo sources require cargo and rustc; install a Rust toolchain or use a prebuilt GitHub/GitLab release"
+    );
 
     Ok(())
 }
@@ -231,7 +349,8 @@ source = "github:owner/tool"
             LockedTool {
                 version: "1.0.0".to_owned(),
                 source: "github:owner/tool".to_owned(),
-                tag: "v1.0.0".to_owned(),
+                tag: Some("v1.0.0".to_owned()),
+                sha256: None,
                 artifacts: BTreeMap::from([(
                     platform,
                     LockedArtifact {
@@ -444,5 +563,12 @@ source = "github:owner/tool"
             fs::read_link(directory.path().join(".tools/.bin/tool")).unwrap(),
             Path::new("../tool/2.0.0/tool")
         );
+    }
+
+    #[test]
+    fn detects_missing_commands() {
+        assert!(!command_available(
+            "binloom-command-that-definitely-does-not-exist"
+        ));
     }
 }

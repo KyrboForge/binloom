@@ -49,15 +49,32 @@
           },
           "source": {
             "type": "string",
-            "pattern": "^(github:[^/\\s]+/[^/\\s]+|gitlab:[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)+)$",
-            "description": "Release source in github:owner/repository or gitlab:group[/subgroup]/project format."
+            "pattern": "^(github:[^/\\s]+/[^/\\s]+|gitlab:[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)+|cargo:[A-Za-z0-9_-]+)$",
+            "description": "Tool source: github:owner/repository, gitlab:group[/subgroup]/project, or cargo:package."
           },
           "asset": {
             "type": "string",
             "minLength": 1,
             "description": "Optional release asset pattern. Supports {version}, {os}, {arch}, and {target}."
           }
-        }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "source": {
+                  "pattern": "^cargo:"
+                }
+              },
+              "required": ["source"]
+            },
+            "then": {
+              "not": {
+                "required": ["asset"]
+              }
+            }
+          }
+        ]
       }
     }
   }

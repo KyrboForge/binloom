@@ -279,7 +279,8 @@ version = "../../x"
             LockedTool {
                 version: "1.0.0".to_owned(),
                 source: "github:owner/tool".to_owned(),
-                tag: "v1.0.0".to_owned(),
+                tag: Some("v1.0.0".to_owned()),
+                sha256: None,
                 artifacts: BTreeMap::new(),
             },
         );
@@ -300,7 +301,8 @@ version = "../../x"
             LockedTool {
                 version: "1.0.0".to_owned(),
                 source: "github:owner/extra".to_owned(),
-                tag: "v1.0.0".to_owned(),
+                tag: Some("v1.0.0".to_owned()),
+                sha256: None,
                 artifacts: BTreeMap::new(),
             },
         );

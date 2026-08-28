@@ -15,9 +15,9 @@
   <a href="LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg" alt="License"></a>
 </p>
 
-Binloom is a small, repository-local manager for downloadable developer tools.
-It gives every contributor and CI job the same pinned executables without a
-global Binloom installation or a language-specific package manager.
+Binloom is a small, repository-local manager for developer tools distributed
+as release binaries or crates.io packages. It gives every contributor and CI
+job the same pinned executables without a global Binloom installation.
 
 It works the same way in Rust, Go, Python, JavaScript, Java, and mixed
 repositories.
@@ -72,16 +72,16 @@ Binloom keeps the whole flow reproducible and local:
 ```mermaid
 flowchart LR
     manifest["binloom.toml<br/>What you want"]
-    lock["binloom.lock<br/>Exact assets + SHA-256"]
+    lock["binloom.lock<br/>Exact inputs + SHA-256"]
     wrapper["./binloomw<br/>Verified bootstrap"]
     tools[".tools/<br/>Local executables"]
 
     manifest --> lock --> wrapper --> tools
 ```
 
-The manifest describes intent. The committed lockfile records exact versions,
-URLs, formats, checksums, and checksum provenance. Downloads are verified
-before installation.
+The manifest describes intent. The committed lockfile records exact versions
+and checksums. Release sources also record artifact URLs, formats, and checksum
+provenance. Downloads are verified before installation.
 
 ## 🚀 Quick start
 
@@ -134,17 +134,18 @@ version = "2.1.11"
 source = "github:evilmartians/lefthook"
 ```
 
-Supported release source formats are:
+Supported source formats are:
 
 - `github:owner/repository`
 - `gitlab:group[/subgroup]/project`
+- `cargo:package`
 
 GitLab projects may use nested groups. `GITLAB_TOKEN` optionally authenticates
 GitLab API requests through the `PRIVATE-TOKEN` header. Public repositories are
 supported; private asset downloads are not.
 
-Binloom discovers platform assets from GitHub and GitLab Releases. When a
-release is ambiguous, an optional pattern can narrow the match:
+GitHub and GitLab sources use prebuilt release assets. When automatic matching
+is ambiguous, an optional pattern can select one asset for each platform:
 
 ```toml
 [tools.example]
@@ -153,9 +154,9 @@ source = "github:owner/example"
 asset = "example_{version}_{os}_{arch}.gz"
 ```
 
-Binloom also tries tool-prefixed tags such as `cargo-nextest-0.9.143`.
-`{target}` expands to Binloom's portable target for each platform. For
-example, cargo-nextest can be pinned without a global `cargo install`:
+Binloom tries `v{version}`, `{version}`, and `{tool}-{version}` release tags.
+`{target}` expands to Binloom's portable target for each platform. For example,
+cargo-nextest can use its prebuilt releases without requiring Rust:
 
 ```toml
 [tools.cargo-nextest]
@@ -168,6 +169,20 @@ asset = "cargo-nextest-{version}-{target}.tar.gz"
 ./binloomw install
 ./binloomw exec cargo nextest run
 ```
+
+Cargo sources download a versioned `.crate` archive from crates.io, verify its
+SHA-256 checksum, and compile it locally with `cargo install --locked`. They
+require both `cargo` and `rustc`, and the package must install a binary matching
+the configured tool name:
+
+```toml
+[tools.cargo-nextest]
+version = "0.9.143"
+source = "cargo:cargo-nextest"
+```
+
+Prefer GitHub or GitLab when suitable prebuilt binaries are available. The
+`asset` field is valid only for those release sources.
 
 Updates ignore releases younger than 24 hours by default. Repositories can
 change that safety window:
@@ -202,7 +217,7 @@ and CI receive the same toolchain.
 | --- | --- | --- |
 | `binloomw` | Generated POSIX bootstrap wrapper | yes |
 | `binloom.toml` | Human-written requirements | yes |
-| `binloom.lock` | Resolved artifacts, checksums, and provenance | yes |
+| `binloom.lock` | Resolved versions, inputs, checksums, and provenance | yes |
 | `.tools/` | Downloaded binaries and links | no |
 
 When `[wrapper]` metadata is present in the lockfile, `binloomw` also verifies
@@ -211,10 +226,11 @@ itself atomically from the locked release asset and restarts.
 
 ## 🎯 Scope
 
-Binloom currently supports public GitHub and GitLab Releases on macOS and
-Linux for ARM64 and x86-64. Assets may be raw executables, single
-gzip-compressed executables, or `.tar.gz` archives containing exactly one
-regular file whose name matches the configured tool name.
+Binloom currently supports public GitHub and GitLab Releases plus public
+crates.io packages. Release assets may be raw executables, gzip-compressed
+executables, or `.tar.gz` archives containing exactly one regular file whose
+name matches the configured tool name. Cargo sources require an existing Rust
+toolchain and compile the verified crate locally.
 
 It is not a language package manager, runtime manager, daemon, GUI, or remote
 package registry. See the [MVP design](docs/design.md) for the detailed

@@ -52,7 +52,7 @@ enum Command {
         #[arg(
             short,
             long,
-            help = "Source of the tool, example = \"github:evilmartians/lefthook\""
+            help = "Source, for example github:evilmartians/lefthook or cargo:cargo-nextest"
         )]
         source: String,
         #[arg(
