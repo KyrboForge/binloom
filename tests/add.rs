@@ -13,8 +13,9 @@ fn add_restores_manifest_when_resolution_fails() {
             "add",
             "--source",
             "github:owner/example",
-            "example",
+            "--version",
             "1.2.3",
+            "example",
         ])
         .current_dir(directory.path())
         .env("ALL_PROXY", "http://127.0.0.1:1")

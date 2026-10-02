@@ -147,7 +147,8 @@ mod tests {
                     LockedTool {
                         version: "1.2.3".to_owned(),
                         source: "github:owner/example".to_owned(),
-                        tag: "v1.2.3".to_owned(),
+                        tag: Some("v1.2.3".to_owned()),
+                        sha256: None,
                         artifacts: Default::default(),
                     },
                 );

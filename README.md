@@ -228,8 +228,8 @@ itself atomically from the locked release asset and restarts.
 
 Binloom currently supports public GitHub and GitLab Releases plus public
 crates.io packages. Release assets may be raw executables, gzip-compressed
-executables, or `.tar.gz` archives containing exactly one regular file whose
-name matches the configured tool name. Cargo sources require an existing Rust
+executables, or `.tar.gz`/`.tgz` archives holding the tool binary: the file
+named after the tool, or the archive's only file. Cargo sources require an existing Rust
 toolchain and compile the verified crate locally.
 
 It is not a language package manager, runtime manager, daemon, GUI, or remote

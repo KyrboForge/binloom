@@ -224,6 +224,14 @@ fn resolve_binloom_release(
         client,
         &mut checksum_cache,
     )?;
+    for artifact in binloom.artifacts.values() {
+        if matches!(artifact.format, ArtifactFormat::TarGz) {
+            bail!(
+                "unsupported Binloom bootstrap asset: {}; binloomw supports only raw and gz",
+                artifact.asset
+            );
+        }
+    }
     let asset = release.find_asset_by_name("binloomw")?;
     let (sha256, checksum_source) = resolve_checksum(client, release, asset, &mut checksum_cache)?;
 
@@ -279,6 +287,56 @@ mod tests {
 
         for tag in ["v/tmp/x", "v../../x", r"v..\..\x", "v.hidden"] {
             assert!(version_from_tag(tag, "tool").is_err(), "{tag:?}");
+        }
+    }
+
+    #[test]
+    fn rejects_tar_archives_only_for_binloom_bootstrap() {
+        let source = Source::try_from("github:KyrboForge/binloom".to_owned()).unwrap();
+        let client = download::client();
+
+        for suffix in ["", ".gz", ".tar.gz", ".tgz"] {
+            let mut assets: Vec<_> = Platform::ALL
+                .iter()
+                .map(|platform| asset(&format!("binloom-{platform}{suffix}")))
+                .collect();
+            assets.push(asset("binloomw"));
+            for asset in &mut assets {
+                asset.sha256 = Some("a".repeat(64));
+            }
+            let release = Release {
+                tag: "v1.0.0".to_owned(),
+                published_at: Some("2026-01-01T00:00:00Z".to_owned()),
+                assets,
+            };
+
+            resolve_release(
+                ReleaseRequest {
+                    name: "binloom",
+                    source: &source,
+                    asset_pattern: None,
+                },
+                &release,
+                0,
+                &client,
+                &mut BTreeMap::new(),
+            )
+            .unwrap();
+
+            let result = resolve_binloom_release(&source, &release, 0, &client);
+            if matches!(suffix, ".tar.gz" | ".tgz") {
+                let error = result.unwrap_err().to_string();
+                assert!(
+                    error.contains("unsupported Binloom bootstrap asset"),
+                    "{error}"
+                );
+                assert!(
+                    error.contains("binloomw supports only raw and gz"),
+                    "{error}"
+                );
+            } else {
+                result.unwrap();
+            }
         }
     }
 

@@ -15,7 +15,8 @@ The MVP supports:
 - public crates.io packages built by an existing Cargo toolchain;
 - exact tool versions;
 - macOS and Linux on ARM64 and x86-64;
-- raw, `.gz`, and `.tar.gz` release assets;
+- raw executables, single `.gz` files, and `.tar.gz`/`.tgz` archives holding
+  the tool binary;
 - SHA-256 verification;
 - repository-local installation;
 - Binloom bootstrapping through a committed POSIX shell wrapper.
@@ -98,8 +99,10 @@ source = "cargo:cargo-nextest"
 ```
 
 During automatic resolution, Binloom matches release assets using the tool
-name and case-insensitive platform aliases. It may prefer gzip assets and
-canonical platform aliases; whenever candidates are discarded, Binloom emits
+name and case-insensitive platform aliases, ignoring checksum files and system
+packages (`.deb`, `.rpm`, `.apk`, `.pkg`, `.dmg`, `.msi`). It may prefer gzip
+assets, canonical platform aliases, and plain names over variants such as
+`tool-fips`; whenever candidates are discarded, Binloom emits
 a warning naming them. Zero or multiple candidates remaining after these
 preferences fail before replacing the lockfile.
 
@@ -269,10 +272,11 @@ the committed lockfile.
 - Installing a Cargo source compiles trusted repository configuration and may
   execute the crate's build script. It requires existing `cargo` and `rustc`
   commands; Binloom never installs a Rust toolchain.
-- `.tar.gz` installation streams the single regular file whose basename
-  matches the tool name. Missing or duplicate matches fail; paths and links
-  are never extracted.
-- Other archive formats fail instead of extracting paths or links.
+- Tar archives are validated before extraction: absolute paths, `..`
+  components, links, and special files fail the install. Only one regular
+  file is streamed out: the file named after the tool, or the archive's only
+  file. Nothing else is unpacked.
+- Unsupported archive formats fail instead of extracting paths or links.
 
 ## Language independence
 
