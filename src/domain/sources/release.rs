@@ -82,8 +82,12 @@ impl Release {
                 let is_metadata = [".sha256", ".sha256sum", ".sig", ".minisig"]
                     .iter()
                     .any(|suffix| name.ends_with(suffix));
+                let is_package = [".deb", ".rpm", ".apk", ".pkg", ".dmg", ".msi"]
+                    .iter()
+                    .any(|suffix| name.ends_with(suffix));
 
                 !is_metadata
+                    && !is_package
                     && name.contains(&tool_name)
                     && platform
                         .os_aliases()
@@ -134,6 +138,13 @@ impl Release {
                     .to_ascii_lowercase()
                     .contains(platform.arch_aliases()[0])
             },
+            emitted_warnings,
+        );
+
+        let matches = Self::prefer(
+            matches,
+            "plain asset name",
+            |asset| Self::is_plain_name(&asset.name, &tool_name, platform),
             emitted_warnings,
         );
 
@@ -275,6 +286,26 @@ impl Release {
         }
     }
 
+    /// A plain name holds only the tool name, platform aliases, version
+    /// numbers and archive extensions, unlike variants such as `tool-fips`.
+    fn is_plain_name(name: &str, tool_name: &str, platform: Platform) -> bool {
+        let mut name = name.to_ascii_lowercase().replace(tool_name, " ");
+
+        for alias in platform.arch_aliases().iter().chain(platform.os_aliases()) {
+            name = name.replace(alias, " ");
+        }
+
+        name.split(|character: char| !character.is_ascii_alphanumeric())
+            .all(|token| {
+                matches!(token, "" | "tar" | "gz" | "tgz")
+                    || token
+                        .strip_prefix('v')
+                        .unwrap_or(token)
+                        .chars()
+                        .all(|character| character.is_ascii_digit())
+            })
+    }
+
     fn warn_dropped(
         assets: &[&ReleaseAsset],
         preferred: &[&ReleaseAsset],
@@ -351,7 +382,7 @@ mod tests {
             tag: "v1.0.0".to_owned(),
             published_at: Some("2026-01-01T00:00:00Z".to_owned()),
             assets: vec![
-                asset("tool_1.0.0_linux_x86_64.gz"),
+                asset("tool-lite_1.0.0_linux_x86_64.gz"),
                 asset("tool-pro_1.0.0_linux_x86_64.gz"),
             ],
         };
@@ -427,6 +458,62 @@ mod tests {
 
         assert_eq!(matched.name, "tool_1.0.0_linux_x86_64.gz");
     }
+    #[test]
+    fn ignores_system_packages_when_matching_binary() {
+        let release = Release {
+            tag: "2026.9.3".to_owned(),
+            published_at: Some("2026-01-01T00:00:00Z".to_owned()),
+            assets: vec![
+                asset("cloudflared-arm64.pkg"),
+                asset("cloudflared-darwin-arm64.tgz"),
+                asset("cloudflared-linux-aarch64.rpm"),
+                asset("cloudflared-linux-arm64"),
+                asset("cloudflared-linux-arm64.deb"),
+            ],
+        };
+        let mut emitted_warnings = BTreeSet::new();
+
+        for (platform, expected_name) in [
+            (Platform::MacosAarch64, "cloudflared-darwin-arm64.tgz"),
+            (Platform::LinuxAarch64, "cloudflared-linux-arm64"),
+        ] {
+            let matched = release
+                .find_asset("cloudflared", platform, &mut emitted_warnings)
+                .unwrap();
+
+            assert_eq!(matched.name, expected_name);
+        }
+    }
+
+    #[test]
+    fn prefers_plain_name_over_variants() {
+        let release = Release {
+            tag: "2026.9.3".to_owned(),
+            published_at: Some("2026-01-01T00:00:00Z".to_owned()),
+            assets: vec![
+                asset("cloudflared-fips-linux-amd64"),
+                asset("cloudflared-linux-amd64"),
+                asset("cloudflared-linux-amd64.deb"),
+                asset("cloudflared-linux-x86_64.rpm"),
+            ],
+        };
+        let mut emitted_warnings = BTreeSet::new();
+
+        let matched = release
+            .find_asset("cloudflared", Platform::LinuxX86_64, &mut emitted_warnings)
+            .unwrap();
+
+        assert_eq!(matched.name, "cloudflared-linux-amd64");
+        assert!(emitted_warnings.contains(
+            "asset selection preferred plain asset name; dropped: cloudflared-fips-linux-amd64"
+        ));
+        assert!(Release::is_plain_name(
+            "tool_v1.2.3_MacOS_arm64.tar.gz",
+            "tool",
+            Platform::MacosAarch64
+        ));
+    }
+
     #[test]
     fn prefers_gzip_over_raw_asset() {
         let release = Release {

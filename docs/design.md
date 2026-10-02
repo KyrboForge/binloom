@@ -84,8 +84,10 @@ source = "gitlab:group/subgroup/project"
 downloads remain outside the MVP.
 
 During automatic resolution, Binloom matches release assets using the tool
-name and case-insensitive platform aliases. It may prefer gzip assets and
-canonical platform aliases; whenever candidates are discarded, Binloom emits
+name and case-insensitive platform aliases, ignoring checksum files and system
+packages (`.deb`, `.rpm`, `.apk`, `.pkg`, `.dmg`, `.msi`). It may prefer gzip
+assets, canonical platform aliases, and plain names over variants such as
+`tool-fips`; whenever candidates are discarded, Binloom emits
 a warning naming them. Zero or multiple candidates remaining after these
 preferences fail before replacing the lockfile.
 
