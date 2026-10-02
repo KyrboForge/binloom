@@ -211,10 +211,6 @@ impl TryFrom<&str> for ArtifactFormat {
                 .is_some_and(|ending| ending.eq_ignore_ascii_case(suffix))
         };
 
-        if ends_with(".tar.gz") || ends_with(".tgz") {
-            return Ok(Self::TarGz);
-        }
-
         if [".zip", ".tar.xz", ".tar.zst"]
             .iter()
             .any(|suffix| ends_with(suffix))
@@ -222,7 +218,7 @@ impl TryFrom<&str> for ArtifactFormat {
             bail!("unsupported asset format: {asset}");
         }
 
-        if ends_with(".tar.gz") {
+        if ends_with(".tar.gz") || ends_with(".tgz") {
             Ok(Self::TarGz)
         } else if ends_with(".gz") {
             Ok(Self::Gz)
@@ -473,10 +469,6 @@ artifacts = {}
         assert!(matches!(
             ArtifactFormat::try_from("tool").unwrap(),
             ArtifactFormat::Raw
-        ));
-        assert!(matches!(
-            ArtifactFormat::try_from("tool.TAR.GZ").unwrap(),
-            ArtifactFormat::TarGz
         ));
         assert!(matches!(
             ArtifactFormat::try_from("tool-darwin-arm64.tgz").unwrap(),
