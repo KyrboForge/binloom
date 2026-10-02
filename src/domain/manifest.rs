@@ -69,6 +69,12 @@ impl TryFrom<&Path> for Manifest {
             validate_tool_name(name)?;
             validate_version(&tool.version)
                 .with_context(|| format!("invalid version for tool {name}"))?;
+            if matches!(tool.source, Source::Cargo(_)) {
+                ensure!(
+                    tool.asset.is_none(),
+                    "Cargo tool {name} does not support release asset patterns"
+                );
+            }
         }
         Ok(manifest)
     }
@@ -167,6 +173,32 @@ asset = "lefthook_{version}_{os}_{arch}.gz"
         assert_eq!(
             lefthook.asset.as_deref(),
             Some("lefthook_{version}_{os}_{arch}.gz")
+        );
+    }
+
+    #[test]
+    fn rejects_cargo_release_asset_patterns() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("binloom.toml");
+        let content = r#"manifest-version = 1
+
+[binloom]
+version = "0.1.0"
+
+[tools.example]
+version = "1.0.0"
+source = "cargo:example"
+"#;
+
+        fs::write(&path, content).unwrap();
+        assert!(Manifest::try_from(path.as_path()).is_ok());
+
+        fs::write(&path, format!("{content}asset = \"example.gz\"\n")).unwrap();
+        let error = Manifest::try_from(path.as_path()).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "Cargo tool example does not support release asset patterns"
         );
     }
 

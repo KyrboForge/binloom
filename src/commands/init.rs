@@ -8,27 +8,32 @@ use std::{
 };
 
 pub(crate) fn init() -> Result<()> {
+    init_at(Path::new("."), update::lock)
+}
+
+fn init_at(root: &Path, lock: impl FnOnce() -> Result<()>) -> Result<()> {
     println!("Initializing Binloom...");
-    let manifest_path = Path::new(common::MANIFEST);
-    let wrapper_path = Path::new("binloomw");
+    let manifest_path = root.join(common::MANIFEST);
+    let wrapper_path = root.join("binloomw");
 
     if manifest_path
         .try_exists()
         .context("failed to check binloom.toml")?
     {
-        Manifest::try_from(manifest_path).context("existing binloom.toml is invalid")?;
+        Manifest::try_from(manifest_path.as_path()).context("existing binloom.toml is invalid")?;
         common::warn("binloom.toml already exists; keeping it");
     } else {
-        generate_manifest(manifest_path).context("failed to create binloom.toml")?;
+        generate_manifest(&manifest_path).context("failed to create binloom.toml")?;
         println!("Created binloom.toml");
     }
 
     // binloomw cannot run without Binloom and wrapper entries in the lockfile.
-    if !Path::new(common::LOCKFILE)
+    if !root
+        .join(common::LOCKFILE)
         .try_exists()
         .context("failed to check binloom.lock")?
     {
-        update::lock().context("failed to create binloom.lock")?;
+        lock().context("failed to create binloom.lock")?;
     }
 
     if wrapper_path
@@ -37,11 +42,11 @@ pub(crate) fn init() -> Result<()> {
     {
         common::warn("binloomw already exists; keeping it");
     } else {
-        generate_binloomw(wrapper_path).context("failed to create binloomw")?;
+        generate_binloomw(&wrapper_path).context("failed to create binloomw")?;
         println!("Created binloomw");
     }
 
-    if add_to_gitignore(Path::new(".gitignore")).context("failed to update .gitignore")? {
+    if add_to_gitignore(&root.join(".gitignore")).context("failed to update .gitignore")? {
         println!("Added .tools/ to .gitignore");
     }
 
@@ -103,7 +108,7 @@ fn generate_binloomw(path: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{add_to_gitignore, generate_binloomw, generate_manifest};
+    use super::{add_to_gitignore, generate_binloomw, generate_manifest, init_at};
     use crate::domain::platform::Platform;
     use sha2::{Digest, Sha256};
     use std::os::unix::fs::PermissionsExt;
@@ -190,7 +195,7 @@ version = "{}"
     }
 
     #[test]
-    fn wrapper_bootstraps_and_reuses_cached_binloom() {
+    fn init_creates_lock_for_runnable_wrapper_offline() {
         let directory = tempfile::tempdir().unwrap();
         let wrapper = directory.path().join("binloomw");
         let asset = directory.path().join("fake-binloom");
@@ -200,16 +205,16 @@ printf 'fake binloom: %s\n' "$*"
 "#;
 
         fs::write(&asset, fake_binary).unwrap();
-        generate_binloomw(&wrapper).unwrap();
 
         let checksum = checksum(fake_binary);
 
         let platform = Platform::current().unwrap();
 
-        fs::write(
-            directory.path().join("binloom.lock"),
-            format!(
-                r#"lock-version = 1
+        let lock = || {
+            fs::write(
+                directory.path().join("binloom.lock"),
+                format!(
+                    r#"lock-version = 1
 
 [binloom]
 version = "test"
@@ -219,10 +224,33 @@ url = "file://{}"
 sha256 = "{checksum}"
 format = "raw"
 "#,
-                asset.display()
-            ),
-        )
-        .unwrap();
+                    asset.display()
+                ),
+            )?;
+            Ok(())
+        };
+
+        init_at(directory.path(), lock).unwrap();
+        let manifest = fs::read_to_string(directory.path().join("binloom.toml")).unwrap();
+        assert!(manifest.contains(&format!("version = \"{}\"", env!("CARGO_PKG_VERSION"))));
+        assert_eq!(
+            fs::read_to_string(directory.path().join(".gitignore")).unwrap(),
+            ".tools/\n"
+        );
+
+        // Existing files are preserved; a missing lock is reconstructed.
+        let original_lock = fs::read(directory.path().join("binloom.lock")).unwrap();
+        init_at(directory.path(), || panic!("existing lock must be kept")).unwrap();
+        assert_eq!(
+            fs::read(directory.path().join("binloom.lock")).unwrap(),
+            original_lock
+        );
+        fs::remove_file(directory.path().join("binloom.lock")).unwrap();
+        init_at(directory.path(), lock).unwrap();
+        assert_eq!(
+            fs::read(directory.path().join("binloom.lock")).unwrap(),
+            original_lock
+        );
 
         let run = || {
             Command::new(&wrapper)

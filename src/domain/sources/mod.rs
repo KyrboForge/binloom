@@ -20,7 +20,7 @@ pub(crate) trait ReleaseProvider {
 
 fn release_tags(name: &str, version: &str) -> Vec<String> {
     if version.starts_with('v') {
-        vec![version.to_owned()]
+        vec![version.to_owned(), format!("{name}-{version}")]
     } else {
         vec![
             format!("v{version}"),
@@ -111,6 +111,11 @@ mod tests {
             release_tags("cargo-nextest", "0.9.143"),
             ["v0.9.143", "0.9.143", "cargo-nextest-0.9.143"]
         );
+    }
+
+    #[test]
+    fn builds_release_tags_for_v_prefixed_version() {
+        assert_eq!(release_tags("tool", "v1.2.3"), ["v1.2.3", "tool-v1.2.3"]);
     }
 
     #[test]

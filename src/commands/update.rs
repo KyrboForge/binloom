@@ -97,6 +97,7 @@ fn update_tools(root: &Path, tool_name: Option<&str>, latest: bool) -> Result<()
             Some(manifest.binloom.version.as_str())
         };
 
+        let minimum_age = binloom_minimum_age(version, minimum_age);
         let (locked, wrapper) = resolve_binloom(&source, version, minimum_age, &client)?;
 
         let version = locked.version.clone();
@@ -170,6 +171,15 @@ fn lock_target<'a>(existing: Option<&Lockfile>, tool_name: &'a str) -> Option<&'
         .then_some(tool_name)
 }
 
+fn binloom_minimum_age(version: Option<&str>, configured: u64) -> u64 {
+    // Locking the exact version already running needs no cooling-off period.
+    if version == Some(env!("CARGO_PKG_VERSION")) {
+        0
+    } else {
+        configured
+    }
+}
+
 fn binloom_source() -> Source {
     Source::try_from("github:KyrboForge/binloom".to_owned())
         .expect("hardcoded Binloom source must be valid")
@@ -179,6 +189,21 @@ fn binloom_source() -> Source {
 mod tests {
     use super::*;
     use crate::domain::lockfile::{ChecksumSource, LockedTool, LockedWrapper};
+
+    #[test]
+    fn exempts_only_the_running_binloom_pin_from_minimum_age() {
+        let minimum_age = 24 * 60;
+
+        assert_eq!(
+            binloom_minimum_age(Some(env!("CARGO_PKG_VERSION")), minimum_age),
+            0
+        );
+        assert_eq!(binloom_minimum_age(None, minimum_age), minimum_age);
+        assert_eq!(
+            binloom_minimum_age(Some("999.0.0"), minimum_age),
+            minimum_age
+        );
+    }
 
     #[test]
     fn selects_single_tool_only_for_complete_lockfile() {
