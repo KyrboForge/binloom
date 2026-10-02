@@ -32,7 +32,7 @@ pub(crate) fn install() -> Result<()> {
     install_from(&root, &client)
 }
 
-fn install_from(root: &Path, client: &download::Client) -> Result<()> {
+pub(super) fn install_from(root: &Path, client: &download::Client) -> Result<()> {
     let manifest_path = root.join(MANIFEST);
     let lock_path = root.join(LOCKFILE);
 

@@ -14,6 +14,20 @@ use crate::{
 
 pub(crate) fn add(name: &str, source: &str, version: &str, asset: Option<&str>) -> Result<()> {
     let root = project_root()?;
+
+    add_with(&root, name, source, version, asset, || {
+        update::lock_added_tool(name).and_then(|()| install::install())
+    })
+}
+
+fn add_with(
+    root: &Path,
+    name: &str,
+    source: &str,
+    version: &str,
+    asset: Option<&str>,
+    lock_and_install: impl FnOnce() -> Result<()>,
+) -> Result<()> {
     let manifest_path = root.join(MANIFEST);
     let lock_path = root.join(LOCKFILE);
 
@@ -26,7 +40,7 @@ pub(crate) fn add(name: &str, source: &str, version: &str, asset: Option<&str>) 
 
     write_tool(manifest_path.as_path(), name, source, version, asset)?;
 
-    let result = update::lock_added_tool(name).and_then(|()| install::install());
+    let result = lock_and_install();
 
     if let Err(error) = result {
         if let Err(restore_error) = restore(&manifest_path, &manifest, &lock_path, lockfile) {
@@ -103,6 +117,59 @@ fn write_tool(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        domain::lockfile::{LockedTool, Lockfile},
+        download,
+    };
+
+    #[test]
+    fn restores_manifest_and_existing_lockfile_when_install_fails() {
+        let directory = tempfile::tempdir().unwrap();
+        let manifest_path = directory.path().join(MANIFEST);
+        let lock_path = directory.path().join(LOCKFILE);
+        let manifest =
+            b"# project tools\r\nmanifest-version = 1\r\n\r\n[binloom]\r\nversion = \"0.1.0\"";
+        let lockfile = b"# preserve this comment\r\nlock-version = 1\r\n";
+
+        fs::write(&manifest_path, manifest).unwrap();
+        fs::write(&lock_path, lockfile).unwrap();
+
+        let error = add_with(
+            directory.path(),
+            "example",
+            "github:owner/example",
+            "1.2.3",
+            None,
+            || {
+                // Resolve offline, then use the real lockfile writer and installer.
+                let mut updated = Lockfile::default();
+                updated.tools.insert(
+                    "example".to_owned(),
+                    LockedTool {
+                        version: "1.2.3".to_owned(),
+                        source: "github:owner/example".to_owned(),
+                        tag: "v1.2.3".to_owned(),
+                        artifacts: Default::default(),
+                    },
+                );
+                updated.write(&lock_path)?;
+                assert_ne!(fs::read(&manifest_path).unwrap(), manifest);
+                assert_ne!(fs::read(&lock_path).unwrap(), lockfile);
+
+                // Missing artifacts fail installation before any download.
+                install::install_from(directory.path(), &download::client())
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("binloom.toml was restored"));
+        assert!(
+            format!("{error:#}").contains("tool example has no artifact for"),
+            "{error:#}"
+        );
+        assert_eq!(fs::read(&manifest_path).unwrap(), manifest);
+        assert_eq!(fs::read(&lock_path).unwrap(), lockfile);
+    }
 
     #[test]
     fn appends_tool_without_rewriting_manifest() {
