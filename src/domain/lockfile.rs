@@ -1,5 +1,8 @@
-use crate::common::{validate_tool_name, validate_version};
-use anyhow::{Context, Result, bail};
+use crate::{
+    common::{validate_tool_name, validate_version},
+    domain::sources::Source,
+};
+use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
@@ -28,7 +31,14 @@ pub(crate) struct Lockfile {
 pub(crate) struct LockedTool {
     pub(crate) version: String,
     pub(crate) source: String,
-    pub(crate) tag: String,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) tag: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) sha256: Option<String>,
+
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) artifacts: BTreeMap<String, LockedArtifact>,
 }
 
@@ -55,10 +65,11 @@ pub(crate) struct LockedArtifact {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "kebab-case")]
 pub(crate) enum ArtifactFormat {
     Raw,
     Gz,
+    TarGz,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -166,6 +177,13 @@ impl Lockfile {
 
     fn validate(&self) -> Result<()> {
         if let Some(binloom) = &self.binloom {
+            LockedTool::validate_locked_tool(binloom).context("invalid Binloom lock entry")?;
+            ensure!(
+                !binloom.source.starts_with("cargo:"),
+                "Binloom cannot use a Cargo source"
+            );
+        }
+        if let Some(binloom) = &self.binloom {
             validate_version(&binloom.version).context("invalid Binloom version in lockfile")?;
         }
 
@@ -175,8 +193,8 @@ impl Lockfile {
 
         for (name, tool) in &self.tools {
             validate_tool_name(name)?;
-            validate_version(&tool.version)
-                .with_context(|| format!("invalid version for tool {name} in lockfile"))?;
+            LockedTool::validate_locked_tool(tool)
+                .with_context(|| format!("invalid lock entry for tool {name}"))?;
         }
 
         Ok(())
@@ -193,18 +211,60 @@ impl TryFrom<&str> for ArtifactFormat {
                 .is_some_and(|ending| ending.eq_ignore_ascii_case(suffix))
         };
 
-        if [".tar.gz", ".tgz", ".zip", ".tar.xz", ".tar.zst"]
+        if [".tgz", ".zip", ".tar.xz", ".tar.zst"]
             .iter()
             .any(|suffix| ends_with(suffix))
         {
             bail!("unsupported asset format: {asset}");
         }
 
-        if ends_with(".gz") {
+        if ends_with(".tar.gz") {
+            Ok(Self::TarGz)
+        } else if ends_with(".gz") {
             Ok(Self::Gz)
         } else {
             Ok(Self::Raw)
         }
+    }
+}
+
+impl LockedTool {
+    fn validate_locked_tool(tool: &Self) -> Result<()> {
+        validate_version(&tool.version)?;
+
+        let source = Source::try_from(tool.source.clone()).map_err(anyhow::Error::msg)?;
+
+        match source {
+            Source::Cargo(_) => {
+                ensure!(tool.tag.is_none(), "Cargo tool must not have a release tag");
+                ensure!(
+                    tool.artifacts.is_empty(),
+                    "Cargo tool must not have release artifacts"
+                );
+
+                let sha256 = tool
+                    .sha256
+                    .as_deref()
+                    .context("Cargo tool is missing SHA-256")?;
+
+                ensure!(
+                    sha256.len() == 64
+                        && sha256
+                            .chars()
+                            .all(|character| character.is_ascii_hexdigit()),
+                    "Cargo tool has invalid SHA-256"
+                );
+            }
+            Source::GitHub(_) | Source::GitLab(_) => {
+                ensure!(tool.tag.is_some(), "release tool is missing its tag");
+                ensure!(
+                    tool.sha256.is_none(),
+                    "release tool must not have a top-level SHA-256"
+                );
+            }
+        }
+
+        Ok(())
     }
 }
 #[cfg(test)]
@@ -232,7 +292,8 @@ mod tests {
             LockedTool {
                 version: "2.1.10".to_owned(),
                 source: "github:evilmartians/lefthook".to_owned(),
-                tag: "v2.1.10".to_owned(),
+                tag: Some("v2.1.10".to_owned()),
+                sha256: None,
                 artifacts,
             },
         );
@@ -290,7 +351,8 @@ mod tests {
             binloom: Some(LockedTool {
                 version: "0.1.0".to_owned(),
                 source: "github:KyrboForge/binloom".to_owned(),
-                tag: "v0.1.0".to_owned(),
+                tag: Some("v0.1.0".to_owned()),
+                sha256: None,
                 artifacts,
             }),
             ..Lockfile::default()
@@ -374,7 +436,8 @@ artifacts = {}
         let locked_tool = |version: &str| LockedTool {
             version: version.to_owned(),
             source: "github:owner/repo".to_owned(),
-            tag: "v1.0.0".to_owned(),
+            tag: Some("v1.0.0".to_owned()),
+            sha256: None,
             artifacts: BTreeMap::new(),
         };
 
@@ -396,6 +459,10 @@ artifacts = {}
     #[test]
     fn detects_artifact_formats_case_insensitively() {
         assert!(matches!(
+            ArtifactFormat::try_from("tool.TAR.GZ").unwrap(),
+            ArtifactFormat::TarGz
+        ));
+        assert!(matches!(
             ArtifactFormat::try_from("tool.GZ").unwrap(),
             ArtifactFormat::Gz
         ));
@@ -403,7 +470,63 @@ artifacts = {}
             ArtifactFormat::try_from("tool").unwrap(),
             ArtifactFormat::Raw
         ));
-        assert!(ArtifactFormat::try_from("tool.TAR.GZ").is_err());
         assert!(ArtifactFormat::try_from("tool.ZIP").is_err());
+    }
+
+    #[test]
+    fn serializes_cargo_tool() {
+        let mut lockfile = Lockfile::default();
+
+        lockfile.tools.insert(
+            "cargo-nextest".to_owned(),
+            LockedTool {
+                version: "0.9.143".to_owned(),
+                source: "cargo:cargo-nextest".to_owned(),
+                tag: None,
+                sha256: Some("a".repeat(64)),
+                artifacts: BTreeMap::new(),
+            },
+        );
+
+        let content = Toml::try_from(&lockfile).unwrap();
+
+        assert!(content.0.contains("source = \"cargo:cargo-nextest\""));
+        assert!(
+            content
+                .0
+                .contains(&format!("sha256 = \"{}\"", "a".repeat(64)))
+        );
+        assert!(!content.0.contains("tag ="));
+        assert!(!content.0.contains("artifacts ="));
+    }
+
+    #[test]
+    fn rejects_inconsistent_cargo_lock_entry() {
+        let mut lockfile = Lockfile::default();
+
+        lockfile.tools.insert(
+            "tool".to_owned(),
+            LockedTool {
+                version: "1.0.0".to_owned(),
+                source: "cargo:tool".to_owned(),
+                tag: None,
+                sha256: None,
+                artifacts: BTreeMap::new(),
+            },
+        );
+
+        assert!(Toml::try_from(&lockfile).is_err());
+
+        {
+            let tool = lockfile.tools.get_mut("tool").unwrap();
+            tool.sha256 = Some("a".repeat(64));
+            tool.tag = Some("v1.0.0".to_owned());
+        }
+
+        assert!(Toml::try_from(&lockfile).is_err());
+
+        lockfile.tools.get_mut("tool").unwrap().tag = None;
+
+        assert!(Toml::try_from(&lockfile).is_ok());
     }
 }

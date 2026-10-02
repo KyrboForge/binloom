@@ -2,9 +2,10 @@ use super::update;
 use crate::{
     common::{LOCKFILE, MANIFEST, TOOLS_DIR, project_root},
     domain::{
-        lockfile::{ArtifactFormat, Lockfile},
+        lockfile::{ArtifactFormat, LockedTool, Lockfile},
         manifest::Manifest,
         platform::Platform,
+        sources::{CargoSource, Source},
     },
     download,
 };
@@ -14,6 +15,7 @@ use std::{
     fs,
     io::{self, Read, Write},
     path::Path,
+    process::{Command, Stdio},
 };
 
 pub(crate) fn install() -> Result<()> {
@@ -46,6 +48,12 @@ fn install_from(root: &Path, client: &download::Client) -> Result<()> {
     let platform_key = platform.to_string();
 
     for (name, tool) in &lockfile.tools {
+        let source = Source::try_from(tool.source.clone()).map_err(anyhow::Error::msg)?;
+
+        if let Source::Cargo(source) = source {
+            install_cargo(root, name, tool, &source, client)?;
+            continue;
+        }
         let artifact = tool
             .artifacts
             .get(&platform_key)
@@ -78,8 +86,13 @@ fn install_from(root: &Path, client: &download::Client) -> Result<()> {
         let mut executable = tempfile::NamedTempFile::new_in(&directory)?;
         let downloaded_file = downloaded.reopen()?;
 
-        unpack(artifact.format, downloaded_file, executable.as_file_mut())
-            .with_context(|| format!("failed to unpack {}", artifact.asset))?;
+        unpack(
+            artifact.format,
+            downloaded_file,
+            executable.as_file_mut(),
+            name,
+        )
+        .with_context(|| format!("failed to unpack {}", artifact.asset))?;
 
         #[cfg(unix)]
         {
@@ -104,6 +117,116 @@ fn install_from(root: &Path, client: &download::Client) -> Result<()> {
 
         println!("Installed {name} {}", tool.version);
     }
+
+    Ok(())
+}
+
+fn install_cargo(
+    root: &Path,
+    name: &str,
+    tool: &LockedTool,
+    source: &CargoSource,
+    client: &download::Client,
+) -> Result<()> {
+    let expected_sha256 = tool
+        .sha256
+        .as_deref()
+        .context("Cargo lock entry is missing SHA-256")?;
+
+    let directory = root.join(TOOLS_DIR).join(name).join(&tool.version);
+    let destination = directory.join(name);
+    let checksum_stamp = directory.join(".crate-sha256");
+
+    fs::create_dir_all(&directory)
+        .with_context(|| format!("failed to create {}", directory.display()))?;
+
+    if cached_artifact_matches(&destination, &checksum_stamp, expected_sha256)? {
+        println!("Already installed {name} {}", tool.version);
+        link_tool(root, name, &tool.version)?;
+        return Ok(());
+    }
+
+    ensure_cargo_toolchain()?;
+
+    let mut archive = tempfile::NamedTempFile::new_in(&directory)?;
+    let actual_sha256 =
+        download::download_to(client, &source.download_url(&tool.version), &mut archive)?;
+
+    ensure!(
+        actual_sha256 == expected_sha256,
+        "checksum mismatch for {name}: expected {expected_sha256}, got {actual_sha256}"
+    );
+
+    let extracted = tempfile::tempdir_in(&directory)?;
+    let archive_file = archive.reopen()?;
+
+    tar::Archive::new(GzDecoder::new(archive_file))
+        .unpack(extracted.path())
+        .context("failed to unpack Cargo package")?;
+
+    let package_root = extracted
+        .path()
+        .join(format!("{}-{}", source.package(), tool.version));
+
+    ensure!(
+        package_root.join("Cargo.toml").is_file(),
+        "Cargo package archive has no expected Cargo.toml"
+    );
+
+    let install_root = tempfile::tempdir_in(&directory)?;
+
+    let status = Command::new("cargo")
+        .arg("install")
+        .arg("--path")
+        .arg(&package_root)
+        .arg("--locked")
+        .arg("--root")
+        .arg(install_root.path())
+        .status()
+        .context("failed to run cargo install")?;
+
+    ensure!(
+        status.success(),
+        "cargo install failed for {}@{}",
+        source.package(),
+        tool.version
+    );
+
+    let installed = install_root.path().join("bin").join(name);
+
+    ensure!(
+        installed.is_file(),
+        "Cargo package {} did not install binary {name}",
+        source.package()
+    );
+
+    fs::rename(&installed, &destination)
+        .with_context(|| format!("failed to install {}", destination.display()))?;
+
+    fs::write(&checksum_stamp, format!("{expected_sha256}\n"))
+        .with_context(|| format!("failed to write {}", checksum_stamp.display()))?;
+
+    link_tool(root, name, &tool.version)?;
+
+    println!("Installed {name} {}", tool.version);
+
+    Ok(())
+}
+fn command_available(command: &str) -> bool {
+    Command::new(command)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn ensure_cargo_toolchain() -> Result<()> {
+    ensure!(
+        command_available("cargo") && command_available("rustc"),
+        "Cargo sources require cargo and rustc; install a Rust toolchain or use a prebuilt GitHub/GitLab release"
+    );
 
     Ok(())
 }
@@ -133,10 +256,35 @@ fn unpack(
     format: ArtifactFormat,
     mut source: impl Read,
     mut destination: impl Write,
+    executable_name: &str,
 ) -> io::Result<u64> {
     match format {
         ArtifactFormat::Raw => io::copy(&mut source, &mut destination),
         ArtifactFormat::Gz => io::copy(&mut GzDecoder::new(source), &mut destination),
+        ArtifactFormat::TarGz => {
+            let mut archive = tar::Archive::new(GzDecoder::new(source));
+            let mut copied = None;
+
+            for entry in archive.entries()? {
+                let mut entry = entry?;
+                if !entry.header().entry_type().is_file()
+                    || entry.path()?.file_name() != Some(executable_name.as_ref())
+                {
+                    continue;
+                }
+                if copied.is_some() {
+                    return Err(io::Error::other(format!(
+                        "archive contains multiple files named {executable_name}"
+                    )));
+                }
+
+                copied = Some(io::copy(&mut entry, &mut destination)?);
+            }
+
+            copied.ok_or_else(|| {
+                io::Error::other(format!("archive contains no file named {executable_name}"))
+            })
+        }
     }
 }
 
@@ -201,7 +349,8 @@ source = "github:owner/tool"
             LockedTool {
                 version: "1.0.0".to_owned(),
                 source: "github:owner/tool".to_owned(),
-                tag: "v1.0.0".to_owned(),
+                tag: Some("v1.0.0".to_owned()),
+                sha256: None,
                 artifacts: BTreeMap::from([(
                     platform,
                     LockedArtifact {
@@ -223,7 +372,7 @@ source = "github:owner/tool"
         let input = b"hello";
 
         let mut raw = Vec::new();
-        unpack(ArtifactFormat::Raw, &input[..], &mut raw).unwrap();
+        unpack(ArtifactFormat::Raw, &input[..], &mut raw, "tool").unwrap();
         assert_eq!(raw, input);
 
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
@@ -231,8 +380,66 @@ source = "github:owner/tool"
         let compressed = encoder.finish().unwrap();
 
         let mut gzip = Vec::new();
-        unpack(ArtifactFormat::Gz, &compressed[..], &mut gzip).unwrap();
+        unpack(ArtifactFormat::Gz, &compressed[..], &mut gzip, "tool").unwrap();
         assert_eq!(gzip, input);
+    }
+
+    #[test]
+    fn extracts_named_executable_from_tar_gzip() {
+        let mut archive = tar::Builder::new(Vec::new());
+        let binary = b"nextest binary";
+        let mut header = tar::Header::new_gnu();
+        header.set_path("cargo-nextest/cargo-nextest").unwrap();
+        header.set_size(binary.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        archive.append(&header, &binary[..]).unwrap();
+        let archive = archive.into_inner().unwrap();
+
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&archive).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let mut extracted = Vec::new();
+
+        unpack(
+            ArtifactFormat::TarGz,
+            &compressed[..],
+            &mut extracted,
+            "cargo-nextest",
+        )
+        .unwrap();
+
+        assert_eq!(extracted, binary);
+    }
+
+    #[test]
+    fn rejects_missing_or_duplicate_tar_executables() {
+        fn compressed_archive(paths: &[&str]) -> Vec<u8> {
+            let mut archive = tar::Builder::new(Vec::new());
+            for path in paths {
+                let mut header = tar::Header::new_gnu();
+                header.set_path(path).unwrap();
+                header.set_size(1);
+                header.set_mode(0o755);
+                header.set_cksum();
+                archive.append(&header, &b"x"[..]).unwrap();
+            }
+            let archive = archive.into_inner().unwrap();
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+            encoder.write_all(&archive).unwrap();
+            encoder.finish().unwrap()
+        }
+
+        let missing = compressed_archive(&["README.md"]);
+        let error = unpack(ArtifactFormat::TarGz, &missing[..], Vec::new(), "tool").unwrap_err();
+        assert_eq!(error.to_string(), "archive contains no file named tool");
+
+        let duplicate = compressed_archive(&["one/tool", "two/tool"]);
+        let error = unpack(ArtifactFormat::TarGz, &duplicate[..], Vec::new(), "tool").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "archive contains multiple files named tool"
+        );
     }
 
     #[test]
@@ -356,5 +563,12 @@ source = "github:owner/tool"
             fs::read_link(directory.path().join(".tools/.bin/tool")).unwrap(),
             Path::new("../tool/2.0.0/tool")
         );
+    }
+
+    #[test]
+    fn detects_missing_commands() {
+        assert!(!command_available(
+            "binloom-command-that-definitely-does-not-exist"
+        ));
     }
 }

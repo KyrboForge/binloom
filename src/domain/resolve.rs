@@ -12,6 +12,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime};
 
+struct ReleaseRequest<'a> {
+    name: &'a str,
+    source: &'a Source,
+    asset_pattern: Option<&'a str>,
+}
+
 pub(crate) fn resolve_tool(
     name: &str,
     tool: &Tool,
@@ -19,18 +25,47 @@ pub(crate) fn resolve_tool(
     minimum_age_minutes: u64,
     client: &Client,
 ) -> anyhow::Result<LockedTool> {
-    let provider = tool.source.provider();
+    if let Source::Cargo(source) = &tool.source {
+        anyhow::ensure!(
+            tool.asset.is_none(),
+            "Cargo tools do not support release asset patterns"
+        );
+
+        let resolved = source.resolve(client, version)?;
+        let subject = format!("{source}@{}", resolved.version);
+
+        ensure_minimum_age(
+            &subject,
+            &resolved.published_at,
+            minimum_age_minutes,
+            OffsetDateTime::now_utc(),
+        )?;
+
+        println!("Found {} for {name}:", resolved.version);
+
+        return Ok(LockedTool {
+            version: resolved.version,
+            source: source.to_string(),
+            tag: None,
+            sha256: Some(resolved.checksum),
+            artifacts: BTreeMap::new(),
+        });
+    }
+
+    let provider = tool.source.release_provider()?;
     let mut checksum_cache = BTreeMap::new();
 
     let release = match version {
-        Some(version) => provider.fetch_release(client, version)?,
+        Some(version) => provider.fetch_release(client, name, version)?,
         None => provider.fetch_latest_release(client)?,
     };
 
     resolve_release(
-        name,
-        &tool.source,
-        tool.asset.as_deref(),
+        ReleaseRequest {
+            name,
+            source: &tool.source,
+            asset_pattern: tool.asset.as_deref(),
+        },
         &release,
         minimum_age_minutes,
         client,
@@ -44,10 +79,10 @@ pub(crate) fn resolve_binloom(
     minimum_age_minutes: u64,
     client: &Client,
 ) -> anyhow::Result<(LockedTool, LockedWrapper)> {
-    let provider = source.provider();
+    let provider = source.release_provider()?;
 
     let release = match version {
-        Some(version) => provider.fetch_release(client, version)?,
+        Some(version) => provider.fetch_release(client, "binloom", version)?,
         None => provider.fetch_latest_release(client)?,
     };
 
@@ -79,8 +114,11 @@ fn resolve_checksum(
     ))
 }
 
-fn version_from_tag(tag: &str) -> anyhow::Result<String> {
-    let version = tag.strip_prefix('v').unwrap_or(tag);
+fn version_from_tag(tag: &str, name: &str) -> anyhow::Result<String> {
+    let version = tag
+        .strip_prefix('v')
+        .or_else(|| tag.strip_prefix(name)?.strip_prefix('-'))
+        .unwrap_or(tag);
 
     validate_version(version)
         .with_context(|| format!("release tag {tag} contains an unsafe version"))?;
@@ -89,23 +127,21 @@ fn version_from_tag(tag: &str) -> anyhow::Result<String> {
 }
 
 fn resolve_release(
-    name: &str,
-    source: &Source,
-    asset_pattern: Option<&str>,
+    request: ReleaseRequest<'_>,
     release: &release::Release,
     minimum_age_minutes: u64,
     client: &Client,
     checksum_cache: &mut BTreeMap<String, String>,
 ) -> anyhow::Result<LockedTool> {
-    println!("Found {} for {name}:", release.tag);
+    println!("Found {} for {}:", release.tag, request.name);
     ensure_minimum_release_age(release, minimum_age_minutes, OffsetDateTime::now_utc())?;
-    let version = version_from_tag(&release.tag)?;
+    let version = version_from_tag(&release.tag, request.name)?;
     let mut artifacts = BTreeMap::new();
     let mut emitted_warnings = BTreeSet::new();
     for platform in Platform::ALL {
-        let asset = match asset_pattern {
+        let asset = match request.asset_pattern {
             Some(pattern) => release.find_asset_by_pattern(pattern, &version, platform)?,
-            None => release.find_asset(name, platform, &mut emitted_warnings)?,
+            None => release.find_asset(request.name, platform, &mut emitted_warnings)?,
         };
         let (sha256, checksum_source) = resolve_checksum(client, release, asset, checksum_cache)?;
         artifacts.insert(
@@ -122,24 +158,21 @@ fn resolve_release(
 
     Ok(LockedTool {
         version,
-        source: source.to_string(),
-        tag: release.tag.clone(),
+        source: request.source.to_string(),
+        tag: Some(release.tag.clone()),
+        sha256: None,
         artifacts,
     })
 }
 
-fn ensure_minimum_release_age(
-    release: &release::Release,
+fn ensure_minimum_age(
+    subject: &str,
+    published_at: &str,
     minimum_minutes: u64,
     now: OffsetDateTime,
 ) -> anyhow::Result<()> {
-    let published_at = release
-        .published_at
-        .as_deref()
-        .with_context(|| format!("release {} has no publication date", release.tag))?;
-
     let published_at = OffsetDateTime::parse(published_at, &Rfc3339)
-        .with_context(|| format!("release {} has invalid publication date", release.tag))?;
+        .with_context(|| format!("{subject} has invalid publication date"))?;
 
     let minimum_seconds = minimum_minutes
         .checked_mul(60)
@@ -153,13 +186,24 @@ fn ensure_minimum_release_age(
         let remaining_seconds = (minimum_age - actual_age).whole_seconds();
         let remaining_minutes = (remaining_seconds + 59) / 60;
 
-        bail!(
-            "release {} is too new; wait {remaining_minutes} more minute(s)",
-            release.tag
-        );
+        bail!("{subject} is too new; wait {remaining_minutes} more minute(s)");
     }
 
     Ok(())
+}
+
+fn ensure_minimum_release_age(
+    release: &release::Release,
+    minimum_minutes: u64,
+    now: OffsetDateTime,
+) -> anyhow::Result<()> {
+    let subject = format!("release {}", release.tag);
+    let published_at = release
+        .published_at
+        .as_deref()
+        .with_context(|| format!("{subject} has no publication date"))?;
+
+    ensure_minimum_age(&subject, published_at, minimum_minutes, now)
 }
 
 fn resolve_binloom_release(
@@ -170,9 +214,11 @@ fn resolve_binloom_release(
 ) -> anyhow::Result<(LockedTool, LockedWrapper)> {
     let mut checksum_cache = BTreeMap::new();
     let binloom = resolve_release(
-        "binloom",
-        source,
-        None,
+        ReleaseRequest {
+            name: "binloom",
+            source,
+            asset_pattern: None,
+        },
         release,
         minimum_age_minutes,
         client,
@@ -194,6 +240,7 @@ fn resolve_binloom_release(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::sources::CargoSource;
     use crate::domain::sources::release::{Release, ReleaseAsset};
     use crate::http_fixture::{Response, Server};
 
@@ -227,12 +274,20 @@ mod tests {
 
     #[test]
     fn rejects_unsafe_release_tags() {
-        assert_eq!(version_from_tag("v1.2.3").unwrap(), "1.2.3");
-        assert_eq!(version_from_tag("1.2.3").unwrap(), "1.2.3");
+        assert_eq!(version_from_tag("v1.2.3", "tool").unwrap(), "1.2.3");
+        assert_eq!(version_from_tag("1.2.3", "tool").unwrap(), "1.2.3");
 
         for tag in ["v/tmp/x", "v../../x", r"v..\..\x", "v.hidden"] {
-            assert!(version_from_tag(tag).is_err(), "{tag:?}");
+            assert!(version_from_tag(tag, "tool").is_err(), "{tag:?}");
         }
+    }
+
+    #[test]
+    fn resolves_version_from_tool_prefixed_tag() {
+        assert_eq!(
+            version_from_tag("cargo-nextest-0.9.143", "cargo-nextest").unwrap(),
+            "0.9.143"
+        );
     }
 
     #[test]
@@ -369,5 +424,55 @@ mod tests {
         );
 
         assert_eq!(server.requests().len(), 1);
+    }
+
+    #[test]
+    fn resolves_cargo_package_into_lock_entry() {
+        let checksum = "a".repeat(64);
+        let server = Server::start(vec![Response {
+            status: 200,
+            body: format!(
+                r#"{{
+                "crate": {{
+                    "max_version": "1.2.3",
+                    "max_stable_version": "1.2.3"
+                }},
+                "versions": [{{
+                    "num": "1.2.3",
+                    "checksum": "{checksum}",
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "yanked": false
+                }}]
+            }}"#
+            )
+            .into_bytes(),
+        }]);
+
+        let source = CargoSource::try_from("cargo:tool".to_owned()).unwrap();
+        let resolved = source
+            .resolve_from(&download::client(), Some("1.2.3"), server.url())
+            .unwrap();
+
+        ensure_minimum_age(
+            "cargo:tool@1.2.3",
+            &resolved.published_at,
+            0,
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+
+        let locked = LockedTool {
+            version: resolved.version,
+            source: source.to_string(),
+            tag: None,
+            sha256: Some(resolved.checksum),
+            artifacts: BTreeMap::new(),
+        };
+
+        assert_eq!(locked.version, "1.2.3");
+        assert_eq!(locked.source, "cargo:tool");
+        assert_eq!(locked.sha256.as_deref(), Some(checksum.as_str()));
+        assert!(locked.tag.is_none());
+        assert!(locked.artifacts.is_empty());
     }
 }
