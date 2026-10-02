@@ -196,7 +196,7 @@ minimum-release-age-minutes = 1440
 
 | Command | Purpose |
 | --- | --- |
-| `binloom init` | Create missing manifest and wrapper files; add `.tools/` to `.gitignore` |
+| `binloom init` | Create missing manifest, lock and wrapper files; add `.tools/` to `.gitignore` |
 | `binloom add <name> --source <source> --version <version> [--asset <pattern>]` | Append a tool, refresh the lockfile, and install it |
 | `binloom install` | Install every locked tool; reconstruct the lockfile from manifest pins when it is missing |
 | `binloom update [tool]` | Update one tool, or all tools and Binloom when omitted |

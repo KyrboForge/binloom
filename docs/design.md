@@ -46,9 +46,11 @@ version and SHA-256 checksum. If it is outdated or changed, it downloads the
 locked `binloomw` release asset, verifies it, replaces itself atomically, and
 restarts. Older lockfiles without this optional section remain usable.
 
-`binloom init` creates missing `binloom.toml` and `binloomw` files, makes the
-wrapper executable, and adds `.tools/` to `.gitignore`. Existing project files
-are preserved.
+`binloom init` creates missing `binloom.toml`, `binloom.lock` and `binloomw`
+files, makes the wrapper executable, and adds `.tools/` to `.gitignore`.
+Existing project files are preserved; an existing `binloom.toml` must be valid.
+The lock is resolved before the wrapper is written, so the wrapper can run
+immediately.
 
 ## Manifest
 

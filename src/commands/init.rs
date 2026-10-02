@@ -1,4 +1,4 @@
-use crate::common;
+use crate::{commands::update, common, domain::manifest::Manifest};
 use anyhow::{Context, Result};
 use std::os::unix::fs::PermissionsExt;
 use std::{
@@ -16,10 +16,19 @@ pub(crate) fn init() -> Result<()> {
         .try_exists()
         .context("failed to check binloom.toml")?
     {
+        Manifest::try_from(manifest_path).context("existing binloom.toml is invalid")?;
         common::warn("binloom.toml already exists; keeping it");
     } else {
         generate_manifest(manifest_path).context("failed to create binloom.toml")?;
         println!("Created binloom.toml");
+    }
+
+    // binloomw cannot run without Binloom and wrapper entries in the lockfile.
+    if !Path::new(common::LOCKFILE)
+        .try_exists()
+        .context("failed to check binloom.lock")?
+    {
+        update::lock().context("failed to create binloom.lock")?;
     }
 
     if wrapper_path
