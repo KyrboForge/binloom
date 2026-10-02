@@ -35,6 +35,7 @@ impl Release {
                         .replace("{version}", version)
                         .replace("{os}", os)
                         .replace("{arch}", arch)
+                        .replace("{target}", platform.target())
                 })
             })
             .collect::<Vec<_>>();
@@ -654,6 +655,32 @@ mod tests {
 
             assert_eq!(matched.name, expected_name);
         }
+    }
+
+    #[test]
+    fn expands_target_pattern_for_cargo_nextest() {
+        let release = Release {
+            tag: "cargo-nextest-0.9.143".to_owned(),
+            published_at: None,
+            assets: vec![
+                asset("cargo-nextest-0.9.143-universal-apple-darwin.tar.gz"),
+                asset("cargo-nextest-0.9.143-aarch64-unknown-linux-musl.tar.gz"),
+                asset("cargo-nextest-0.9.143-x86_64-unknown-linux-musl.tar.gz"),
+            ],
+        };
+
+        let matched = release
+            .find_asset_by_pattern(
+                "cargo-nextest-{version}-{target}.tar.gz",
+                "0.9.143",
+                Platform::MacosAarch64,
+            )
+            .unwrap();
+
+        assert_eq!(
+            matched.name,
+            "cargo-nextest-0.9.143-universal-apple-darwin.tar.gz"
+        );
     }
 
     #[test]

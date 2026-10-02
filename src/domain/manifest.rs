@@ -69,6 +69,12 @@ impl TryFrom<&Path> for Manifest {
             validate_tool_name(name)?;
             validate_version(&tool.version)
                 .with_context(|| format!("invalid version for tool {name}"))?;
+            if matches!(tool.source, Source::Cargo(_)) {
+                ensure!(
+                    tool.asset.is_none(),
+                    "Cargo tool {name} does not support release asset patterns"
+                );
+            }
         }
         Ok(manifest)
     }
@@ -171,6 +177,32 @@ asset = "lefthook_{version}_{os}_{arch}.gz"
     }
 
     #[test]
+    fn rejects_cargo_release_asset_patterns() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("binloom.toml");
+        let content = r#"manifest-version = 1
+
+[binloom]
+version = "0.1.0"
+
+[tools.example]
+version = "1.0.0"
+source = "cargo:example"
+"#;
+
+        fs::write(&path, content).unwrap();
+        assert!(Manifest::try_from(path.as_path()).is_ok());
+
+        fs::write(&path, format!("{content}asset = \"example.gz\"\n")).unwrap();
+        let error = Manifest::try_from(path.as_path()).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "Cargo tool example does not support release asset patterns"
+        );
+    }
+
+    #[test]
     fn rejects_unsupported_manifest_version() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("binloom.toml");
@@ -217,6 +249,7 @@ source = "github:evilmartians/lefthook"
         assert!(content.contains("version = \"0.1.1\" # wrapper"));
         assert!(content.contains("version = \"2.1.11\" # hooks"));
     }
+
     #[test]
     fn rejects_unsafe_names_and_versions() {
         let directory = tempfile::tempdir().unwrap();
@@ -278,7 +311,8 @@ version = "../../x"
             LockedTool {
                 version: "1.0.0".to_owned(),
                 source: "github:owner/tool".to_owned(),
-                tag: "v1.0.0".to_owned(),
+                tag: Some("v1.0.0".to_owned()),
+                sha256: None,
                 artifacts: BTreeMap::new(),
             },
         );
@@ -299,7 +333,8 @@ version = "../../x"
             LockedTool {
                 version: "1.0.0".to_owned(),
                 source: "github:owner/extra".to_owned(),
-                tag: "v1.0.0".to_owned(),
+                tag: Some("v1.0.0".to_owned()),
+                sha256: None,
                 artifacts: BTreeMap::new(),
             },
         );

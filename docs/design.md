@@ -5,12 +5,14 @@ features.
 
 ## Product boundary
 
-Binloom manages downloadable developer executables used by a repository. It
-does not manage application dependencies or language runtimes.
+Binloom manages pinned developer executables used by a repository. Tools may
+come from prebuilt release assets or be compiled from a verified crates.io
+package. Binloom does not manage application dependencies or language runtimes.
 
 The MVP supports:
 
 - public GitHub and GitLab Releases;
+- public crates.io packages built by an existing Cargo toolchain;
 - exact tool versions;
 - macOS and Linux on ARM64 and x86-64;
 - raw executables, single `.gz` files, and `.tar.gz`/`.tgz` archives holding
@@ -19,9 +21,9 @@ The MVP supports:
 - repository-local installation;
 - Binloom bootstrapping through a committed POSIX shell wrapper.
 
-Windows, private repositories, other release sources, semantic version ranges,
-plugins, registry services, complex archives, and persistent shell integration
-are outside the MVP.
+Windows, private repositories, custom Cargo registries, semantic version
+ranges, plugins, registry services, other archive formats, and persistent shell
+integration are outside the MVP.
 
 ## Bootstrap model
 
@@ -45,9 +47,11 @@ version and SHA-256 checksum. If it is outdated or changed, it downloads the
 locked `binloomw` release asset, verifies it, replaces itself atomically, and
 restarts. Older lockfiles without this optional section remain usable.
 
-`binloom init` creates missing `binloom.toml` and `binloomw` files, makes the
-wrapper executable, and adds `.tools/` to `.gitignore`. Existing project files
-are preserved.
+`binloom init` creates missing `binloom.toml`, `binloom.lock` and `binloomw`
+files, makes the wrapper executable, and adds `.tools/` to `.gitignore`.
+Existing project files are preserved; an existing `binloom.toml` must be valid.
+The lock is resolved before the wrapper is written, so the wrapper can run
+immediately.
 
 ## Manifest
 
@@ -69,9 +73,9 @@ source = "github:evilmartians/lefthook"
 The schema comment enables validation in editors that support TOML schemas.
 Binloom preserves comments while changing versions.
 
-Release sources use `github:owner/repository` or
-`gitlab:group[/subgroup]/project`. GitLab project paths may contain nested
-groups:
+Tool sources use `github:owner/repository`,
+`gitlab:group[/subgroup]/project`, or `cargo:package`. GitLab project paths may
+contain nested groups:
 
 ```toml
 [tools.example]
@@ -82,6 +86,17 @@ source = "gitlab:group/subgroup/project"
 `GITLAB_TOKEN` optionally authenticates GitLab API requests through the
 `PRIVATE-TOKEN` header. Public repositories are supported; private asset
 downloads remain outside the MVP.
+
+Cargo sources resolve package metadata from crates.io, download and verify the
+locked `.crate` checksum, and compile the package with the existing `cargo` and
+`rustc` commands. The package must install a binary matching the configured tool
+name:
+
+```toml
+[tools.cargo-nextest]
+version = "0.9.143"
+source = "cargo:cargo-nextest"
+```
 
 During automatic resolution, Binloom matches release assets using the tool
 name and case-insensitive platform aliases, ignoring checksum files and system
@@ -94,6 +109,8 @@ preferences fail before replacing the lockfile.
 An explicit `asset` pattern bypasses automatic matching and must resolve to
 exactly one asset for every supported platform.
 
+The `asset` field is valid only for GitHub and GitLab release sources.
+
 An optional asset pattern can narrow an ambiguous release:
 
 ```toml
@@ -103,8 +120,18 @@ source = "github:owner/example"
 asset = "example_{version}_{os}_{arch}.gz"
 ```
 
-`{os}` and `{arch}` use Binloom's built-in alias sets, so users do not repeat
-platform mappings in the manifest.
+`{os}` and `{arch}` use Binloom's built-in alias sets. `{target}` expands to a
+portable release target such as `x86_64-unknown-linux-musl` or
+`universal-apple-darwin`.
+
+Binloom tries `v{version}`, `{version}`, and `{tool}-{version}` release tags:
+
+```toml
+[tools.cargo-nextest]
+version = "0.9.143"
+source = "github:nextest-rs/nextest"
+asset = "cargo-nextest-{version}-{target}.tar.gz"
+```
 
 Updates reject releases younger than 24 hours by default:
 
@@ -117,8 +144,8 @@ The value may be set to `0` when immediate releases are explicitly desired.
 
 ## Lockfile
 
-`binloom.lock` is generated and committed. It records the release tag and
-artifact name, URL, checksum, and format for every supported platform:
+`binloom.lock` is generated and committed. Release entries record the tag and
+the artifact name, URL, checksum, and format for every supported platform:
 
 ```toml
 lock-version = 1
@@ -144,6 +171,16 @@ checksum-source = "digest"
 
 Tool entries use the same `artifacts.<platform>` shape under
 `[tools.<name>]`. URLs use HTTPS and checksums are lowercase SHA-256 hex.
+
+Cargo entries instead record one checksum for the platform-independent source
+archive:
+
+```toml
+[tools.cargo-nextest]
+version = "0.9.143"
+source = "cargo:cargo-nextest"
+sha256 = "..."
+```
 
 `checksum-source` records where the checksum came from:
 
@@ -220,6 +257,7 @@ the committed lockfile.
 - The committed manifest, lockfile, and wrapper are trusted repository state.
 - GitHub and GitLab release metadata and downloaded bytes are untrusted remote
   input.
+- crates.io metadata and `.crate` archives are untrusted remote input.
 - Published digests and checksum sidecars provide an upstream checksum.
 - When neither exists, Binloom warns, hashes the downloaded bytes, and records
   `checksum-source = "download"`. This is trust on first use: later installs
@@ -231,6 +269,9 @@ the committed lockfile.
 - An existing executable at the exact locked path makes installation
   idempotent.
 - Resolution never executes downloaded content.
+- Installing a Cargo source compiles trusted repository configuration and may
+  execute the crate's build script. It requires existing `cargo` and `rustc`
+  commands; Binloom never installs a Rust toolchain.
 - Tar archives are validated before extraction: absolute paths, `..`
   components, links, and special files fail the install. Only one regular
   file is streamed out: the file named after the tool, or the archive's only
@@ -239,9 +280,10 @@ the committed lockfile.
 
 ## Language independence
 
-Binloom operates only on executable files and process arguments. It does not
-inspect `Cargo.toml`, `package.json`, `pyproject.toml`, or equivalent language
-files. Any repository uses the same workflow:
+Binloom does not inspect a project's `Cargo.toml`, `package.json`,
+`pyproject.toml`, or equivalent dependency files. Cargo is an optional tool
+source, not a requirement for the project using Binloom. Every repository uses
+the same workflow:
 
 ```sh
 ./binloomw install
