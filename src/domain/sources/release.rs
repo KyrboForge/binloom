@@ -102,7 +102,10 @@ impl Release {
         let gzip_matches = matches
             .iter()
             .copied()
-            .filter(|asset| asset.name.to_ascii_lowercase().ends_with(".gz"))
+            .filter(|asset| {
+                let name = asset.name.to_ascii_lowercase();
+                name.ends_with(".gz") || name.ends_with(".tgz")
+            })
             .collect::<Vec<_>>();
 
         let matches = if gzip_matches.len() == 1 {
@@ -144,14 +147,17 @@ impl Release {
         let matches = Self::prefer(
             matches,
             "plain asset name",
-            |asset| Self::is_plain_name(&asset.name, &tool_name, platform),
+            |asset| self.is_plain_name(&asset.name, &tool_name, platform),
             emitted_warnings,
         );
 
         let matches = Self::prefer(
             matches,
             "gzip format",
-            |asset| asset.name.to_ascii_lowercase().ends_with(".gz"),
+            |asset| {
+                let name = asset.name.to_ascii_lowercase();
+                name.ends_with(".gz") || name.ends_with(".tgz")
+            },
             emitted_warnings,
         );
 
@@ -287,9 +293,14 @@ impl Release {
     }
 
     /// A plain name holds only the tool name, platform aliases, version
-    /// numbers and archive extensions, unlike variants such as `tool-fips`.
-    fn is_plain_name(name: &str, tool_name: &str, platform: Platform) -> bool {
-        let mut name = name.to_ascii_lowercase().replace(tool_name, " ");
+    /// components and archive extensions, unlike variants such as `tool-fips`.
+    fn is_plain_name(&self, name: &str, tool_name: &str, platform: Platform) -> bool {
+        let tag = self.tag.to_ascii_lowercase();
+        let mut name = name
+            .to_ascii_lowercase()
+            .replace(&tag, " ")
+            .replace(tag.strip_prefix('v').unwrap_or(&tag), " ")
+            .replace(tool_name, " ");
 
         for alias in platform.arch_aliases().iter().chain(platform.os_aliases()) {
             name = name.replace(alias, " ");
@@ -507,7 +518,7 @@ mod tests {
         assert!(emitted_warnings.contains(
             "asset selection preferred plain asset name; dropped: cloudflared-fips-linux-amd64"
         ));
-        assert!(Release::is_plain_name(
+        assert!(release.is_plain_name(
             "tool_v1.2.3_MacOS_arm64.tar.gz",
             "tool",
             Platform::MacosAarch64
@@ -531,6 +542,71 @@ mod tests {
             .unwrap();
 
         assert_eq!(matched.name, "tool_1.0.0_MacOS_arm64.gz");
+    }
+
+    #[test]
+    fn prefers_tgz_over_raw_asset_in_both_preference_passes() {
+        for other_gzip in [false, true] {
+            let mut release = Release {
+                tag: "v1.0.0".to_owned(),
+                published_at: None,
+                assets: vec![asset("tool-macos-arm64"), asset("tool-macos-arm64.tgz")],
+            };
+            if other_gzip {
+                release.assets.push(asset("tool-darwin-arm64.gz"));
+            }
+
+            let matched = release
+                .find_asset("tool", Platform::MacosAarch64, &mut BTreeSet::new())
+                .unwrap();
+
+            assert_eq!(matched.name, "tool-macos-arm64.tgz");
+        }
+    }
+
+    #[test]
+    fn keeps_equivalent_tgz_and_tar_gz_assets_ambiguous() {
+        let release = Release {
+            tag: "v1.0.0".to_owned(),
+            published_at: None,
+            assets: vec![
+                asset("tool-linux-amd64.tgz"),
+                asset("tool-linux-amd64.tar.gz"),
+            ],
+        };
+
+        let error = release
+            .find_asset("tool", Platform::LinuxX86_64, &mut BTreeSet::new())
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .starts_with("multiple release assets matched")
+        );
+    }
+
+    #[test]
+    fn prefers_plain_prerelease_name_over_variants() {
+        for version in ["1.0.0-beta", "1.0.0-beta+build", "1.0.0-beta+fips"] {
+            for prefix in ["", "v"] {
+                let plain = format!("tool-{prefix}{version}-linux-amd64");
+                let release = Release {
+                    tag: format!("v{version}"),
+                    published_at: None,
+                    assets: vec![
+                        asset(&format!("tool-fips-{prefix}{version}-linux-amd64")),
+                        asset(&plain),
+                    ],
+                };
+
+                let matched = release
+                    .find_asset("tool", Platform::LinuxX86_64, &mut BTreeSet::new())
+                    .unwrap();
+
+                assert_eq!(matched.name, plain);
+            }
+        }
     }
 
     #[test]
