@@ -1,6 +1,6 @@
 use std::{
     fs::{self, OpenOptions},
-    io::Write,
+    io::{self, Write},
     path::Path,
 };
 
@@ -8,18 +8,54 @@ use anyhow::{Context, Result, ensure};
 
 use super::{install, update};
 use crate::{
-    common::{MANIFEST, project_root, validate_tool_name, validate_version},
+    common::{LOCKFILE, MANIFEST, project_root, validate_tool_name, validate_version},
     domain::{manifest::Manifest, sources::Source},
 };
 
 pub(crate) fn add(name: &str, source: &str, version: &str, asset: Option<&str>) -> Result<()> {
     let root = project_root()?;
     let manifest_path = root.join(MANIFEST);
+    let lock_path = root.join(LOCKFILE);
+
+    let manifest = fs::read(&manifest_path).context("failed to read binloom.toml")?;
+    let lockfile = match fs::read(&lock_path) {
+        Ok(content) => Some(content),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).context("failed to read binloom.lock"),
+    };
 
     write_tool(manifest_path.as_path(), name, source, version, asset)?;
-    update::lock_added_tool(name)
-        .context("tool was added to binloom.toml, but lockfile update failed")?;
-    install::install()
+
+    let result = update::lock_added_tool(name).and_then(|()| install::install());
+
+    if let Err(error) = result {
+        if let Err(restore_error) = restore(&manifest_path, &manifest, &lock_path, lockfile) {
+            return Err(error.context(format!(
+                "failed to restore binloom.toml and binloom.lock: {restore_error:#}"
+            )));
+        }
+
+        return Err(error.context(format!("failed to add {name}; binloom.toml was restored")));
+    }
+
+    Ok(())
+}
+
+fn restore(
+    manifest_path: &Path,
+    manifest: &[u8],
+    lock_path: &Path,
+    lockfile: Option<Vec<u8>>,
+) -> io::Result<()> {
+    fs::write(manifest_path, manifest)?;
+
+    match lockfile {
+        Some(content) => fs::write(lock_path, content),
+        None => match fs::remove_file(lock_path) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
+        },
+    }
 }
 
 fn write_tool(
