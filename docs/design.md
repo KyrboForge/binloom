@@ -13,7 +13,8 @@ The MVP supports:
 - public GitHub and GitLab Releases;
 - exact tool versions;
 - macOS and Linux on ARM64 and x86-64;
-- raw executables and single `.gz` files;
+- raw executables, single `.gz` files, and `.tar.gz`/`.tgz` archives holding
+  the tool binary;
 - SHA-256 verification;
 - repository-local installation;
 - Binloom bootstrapping through a committed POSIX shell wrapper.
@@ -228,6 +229,10 @@ the committed lockfile.
 - An existing executable at the exact locked path makes installation
   idempotent.
 - Resolution never executes downloaded content.
+- Tar archives are validated before extraction: absolute paths, `..`
+  components, links, and special files fail the install. Only one regular
+  file is streamed out: the file named after the tool, or the archive's only
+  file. Nothing else is unpacked.
 - Unsupported archive formats fail instead of extracting paths or links.
 
 ## Language independence

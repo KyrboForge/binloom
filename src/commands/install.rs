@@ -8,13 +8,14 @@ use crate::{
     },
     download,
 };
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use flate2::read::GzDecoder;
 use std::{
     fs,
-    io::{self, Read, Write},
-    path::Path,
+    io::{self, Read, Seek, Write},
+    path::{Component, Path},
 };
+use tar::{Archive, EntryType};
 
 pub(crate) fn install() -> Result<()> {
     let root = project_root()?;
@@ -78,8 +79,13 @@ fn install_from(root: &Path, client: &download::Client) -> Result<()> {
         let mut executable = tempfile::NamedTempFile::new_in(&directory)?;
         let downloaded_file = downloaded.reopen()?;
 
-        unpack(artifact.format, downloaded_file, executable.as_file_mut())
-            .with_context(|| format!("failed to unpack {}", artifact.asset))?;
+        unpack(
+            artifact.format,
+            name,
+            downloaded_file,
+            executable.as_file_mut(),
+        )
+        .with_context(|| format!("failed to unpack {}", artifact.asset))?;
 
         #[cfg(unix)]
         {
@@ -131,12 +137,66 @@ fn cached_artifact_matches(
 
 fn unpack(
     format: ArtifactFormat,
-    mut source: impl Read,
+    name: &str,
+    mut source: impl Read + Seek,
     mut destination: impl Write,
-) -> io::Result<u64> {
+) -> Result<()> {
     match format {
-        ArtifactFormat::Raw => io::copy(&mut source, &mut destination),
-        ArtifactFormat::Gz => io::copy(&mut GzDecoder::new(source), &mut destination),
+        ArtifactFormat::Raw => io::copy(&mut source, &mut destination)?,
+        ArtifactFormat::Gz => io::copy(&mut GzDecoder::new(source), &mut destination)?,
+        ArtifactFormat::TarGz => {
+            let index = select_tar_entry(&mut source, name)?;
+
+            source.rewind()?;
+
+            let mut archive = Archive::new(GzDecoder::new(source));
+            let mut entry = archive
+                .entries()?
+                .nth(index)
+                .context("archive entry disappeared")??;
+
+            io::copy(&mut entry, &mut destination)?
+        }
+    };
+
+    Ok(())
+}
+
+/// Validates every archive entry and picks the executable without touching the
+/// filesystem: a regular file named after the tool, or the archive's only file.
+fn select_tar_entry(source: impl Read, name: &str) -> Result<usize> {
+    let mut archive = Archive::new(GzDecoder::new(source));
+    let mut files = Vec::new();
+    let mut matches = Vec::new();
+
+    for (index, entry) in archive.entries()?.enumerate() {
+        let entry = entry?;
+        let path = entry.path()?;
+
+        ensure!(
+            path.components()
+                .all(|component| matches!(component, Component::Normal(_) | Component::CurDir)),
+            "unsafe archive entry: {}",
+            path.display()
+        );
+
+        match entry.header().entry_type() {
+            EntryType::Regular => {
+                if path.file_name() == Some(name.as_ref()) {
+                    matches.push(index);
+                }
+
+                files.push(index);
+            }
+            EntryType::Directory | EntryType::XGlobalHeader => {}
+            other => bail!("unsupported archive entry {}: {other:?}", path.display()),
+        }
+    }
+
+    match (matches.as_slice(), files.as_slice()) {
+        ([index], _) | ([], [index]) => Ok(*index),
+        ([], _) => bail!("archive has no file named {name}"),
+        _ => bail!("archive has multiple files named {name}"),
     }
 }
 
@@ -223,7 +283,13 @@ source = "github:owner/tool"
         let input = b"hello";
 
         let mut raw = Vec::new();
-        unpack(ArtifactFormat::Raw, &input[..], &mut raw).unwrap();
+        unpack(
+            ArtifactFormat::Raw,
+            "tool",
+            io::Cursor::new(input),
+            &mut raw,
+        )
+        .unwrap();
         assert_eq!(raw, input);
 
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
@@ -231,8 +297,100 @@ source = "github:owner/tool"
         let compressed = encoder.finish().unwrap();
 
         let mut gzip = Vec::new();
-        unpack(ArtifactFormat::Gz, &compressed[..], &mut gzip).unwrap();
+        unpack(
+            ArtifactFormat::Gz,
+            "tool",
+            io::Cursor::new(&compressed),
+            &mut gzip,
+        )
+        .unwrap();
         assert_eq!(gzip, input);
+    }
+
+    fn tar_gz(entries: &[(&str, EntryType, &[u8])]) -> Vec<u8> {
+        let mut builder = tar::Builder::new(GzEncoder::new(Vec::new(), Compression::default()));
+
+        for (path, kind, data) in entries {
+            // Raw header names bypass the builder's path validation so tests can
+            // produce the malicious archives that real attackers would.
+            let mut header = tar::Header::new_gnu();
+            header.as_gnu_mut().unwrap().name[..path.len()].copy_from_slice(path.as_bytes());
+            header.set_entry_type(*kind);
+            header.set_size(data.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder.append(&header, *data).unwrap();
+        }
+
+        builder.into_inner().unwrap().finish().unwrap()
+    }
+
+    fn unpack_tar(entries: &[(&str, EntryType, &[u8])]) -> Result<Vec<u8>> {
+        let mut output = Vec::new();
+        unpack(
+            ArtifactFormat::TarGz,
+            "tool",
+            io::Cursor::new(tar_gz(entries)),
+            &mut output,
+        )?;
+        Ok(output)
+    }
+
+    #[test]
+    fn unpacks_tool_from_tar_gz() {
+        assert_eq!(
+            unpack_tar(&[("tool", EntryType::Regular, b"only")]).unwrap(),
+            b"only"
+        );
+        assert_eq!(
+            unpack_tar(&[("other", EntryType::Regular, b"single")]).unwrap(),
+            b"single"
+        );
+        assert_eq!(
+            unpack_tar(&[
+                ("./dist/", EntryType::Directory, b""),
+                ("./dist/README.md", EntryType::Regular, b"docs"),
+                ("./dist/tool", EntryType::Regular, b"binary"),
+                ("./dist/LICENSE", EntryType::Regular, b"license"),
+            ])
+            .unwrap(),
+            b"binary"
+        );
+    }
+
+    #[test]
+    fn rejects_unselectable_tar_gz() {
+        let error = unpack_tar(&[
+            ("README.md", EntryType::Regular, b"docs"),
+            ("LICENSE", EntryType::Regular, b"license"),
+        ])
+        .unwrap_err();
+        assert!(error.to_string().contains("no file named tool"));
+
+        let error = unpack_tar(&[
+            ("a/tool", EntryType::Regular, b"one"),
+            ("b/tool", EntryType::Regular, b"two"),
+        ])
+        .unwrap_err();
+        assert!(error.to_string().contains("multiple files named tool"));
+    }
+
+    #[test]
+    fn rejects_malicious_tar_gz_entries() {
+        for entries in [
+            &[("../tool", EntryType::Regular, &b"x"[..])][..],
+            &[("dist/../../tool", EntryType::Regular, b"x")],
+            &[("/usr/bin/tool", EntryType::Regular, b"x")],
+            &[("tool", EntryType::Symlink, b"")],
+            &[("tool", EntryType::Link, b"")],
+            &[("tool", EntryType::Char, b"")],
+            &[
+                ("tool", EntryType::Regular, b"binary"),
+                ("../escape", EntryType::Regular, b"x"),
+            ],
+        ] {
+            assert!(unpack_tar(entries).is_err(), "accepted {entries:?}");
+        }
     }
 
     #[test]

@@ -59,6 +59,8 @@ pub(crate) struct LockedArtifact {
 pub(crate) enum ArtifactFormat {
     Raw,
     Gz,
+    #[serde(rename = "tar.gz")]
+    TarGz,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -193,7 +195,11 @@ impl TryFrom<&str> for ArtifactFormat {
                 .is_some_and(|ending| ending.eq_ignore_ascii_case(suffix))
         };
 
-        if [".tar.gz", ".tgz", ".zip", ".tar.xz", ".tar.zst"]
+        if ends_with(".tar.gz") || ends_with(".tgz") {
+            return Ok(Self::TarGz);
+        }
+
+        if [".zip", ".tar.xz", ".tar.zst"]
             .iter()
             .any(|suffix| ends_with(suffix))
         {
@@ -403,7 +409,14 @@ artifacts = {}
             ArtifactFormat::try_from("tool").unwrap(),
             ArtifactFormat::Raw
         ));
-        assert!(ArtifactFormat::try_from("tool.TAR.GZ").is_err());
+        assert!(matches!(
+            ArtifactFormat::try_from("tool.TAR.GZ").unwrap(),
+            ArtifactFormat::TarGz
+        ));
+        assert!(matches!(
+            ArtifactFormat::try_from("tool-darwin-arm64.tgz").unwrap(),
+            ArtifactFormat::TarGz
+        ));
         assert!(ArtifactFormat::try_from("tool.ZIP").is_err());
     }
 }
