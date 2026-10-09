@@ -2,5 +2,28 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "config:recommended"
+  ],
+  "platformAutomerge": true,
+  "automergeType": "pr",
+  "ignoreTests": false,
+  "packageRules": [
+    {
+      "description": "Automerge non-major updates (including 0.x minor) after CI passes",
+      "matchUpdateTypes": [
+        "patch",
+        "minor",
+        "pin",
+        "pinDigest",
+        "digest"
+      ],
+      "automerge": true
+    },
+    {
+      "description": "Leave major updates for manual review",
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "automerge": false
+    }
   ]
 }
