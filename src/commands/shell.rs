@@ -473,14 +473,19 @@ pub(super) fn maybe_prompt(root: &Path, no_prompt: bool) -> Result<()> {
     };
     // An active hook (possibly `shell init` run by hand) never prompts or edits
     // profiles, but it still repairs a setup the user already consented to.
-    if env::var("BINLOOM_SHELL_HOOK").as_deref() == Ok("1") {
+    let result = if env::var("BINLOOM_SHELL_HOOK").as_deref() == Ok("1") {
         restore_consented(&mut io::stderr().lock(), &setup).map(drop)
     } else {
         prompt_setup(&mut io::stdin().lock(), &mut io::stderr().lock(), &setup)
+    };
+    // Setup is optional and the tools are installed, so a refused or failed
+    // setup (even one hit before the question) must not fail `install`.
+    if let Err(error) = result {
+        eprintln!(
+            "warning: shell activation setup failed: {error:#}; installed tools are still available through binloom exec"
+        );
     }
-    .context(
-        "shell activation setup failed; installed tools are still available through binloom exec",
-    )
+    Ok(())
 }
 
 const BLOCK_BEGIN: &str = "# >>> binloom shell activation >>>";

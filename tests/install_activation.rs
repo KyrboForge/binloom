@@ -97,6 +97,33 @@ fn install_skips_linking_binloom_whose_stamp_does_not_match_the_lock() {
 }
 
 #[test]
+fn install_removes_a_link_to_an_older_binloom_when_the_locked_one_is_missing() {
+    let home = tempfile::tempdir().unwrap();
+    project(home.path());
+    fs::remove_file(home.path().join(".tools/binloom/1.0.0/binloom")).unwrap();
+    let old = home.path().join(".tools/binloom/old/binloom");
+    fs::create_dir_all(old.parent().unwrap()).unwrap();
+    fs::write(&old, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::create_dir_all(home.path().join(".tools/.bin")).unwrap();
+    let link = home.path().join(".tools/.bin/binloom");
+    std::os::unix::fs::symlink("../binloom/old/binloom", &link).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_binloom"))
+        .arg("install")
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", home.path().join(".config"))
+        .current_dir(home.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("./binloomw install"));
+    assert!(link.symlink_metadata().is_err());
+}
+
+#[test]
 fn install_rejects_reserved_binloom_tool_without_overwriting_it() {
     for name in ["binloom", "Binloom"] {
         install_rejects_reserved_tool(name);

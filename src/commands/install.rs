@@ -154,19 +154,30 @@ pub(super) fn install_from(root: &Path, client: &download::Client) -> Result<()>
         println!("Installed {name} {}", tool.version);
     }
 
-    if let Some(binloom) = &lockfile.binloom
-        && let Some(artifact) = binloom.artifacts.get(&platform_key)
-    {
+    if let Some(binloom) = &lockfile.binloom {
         let directory = root.join(TOOLS_DIR).join("binloom").join(&binloom.version);
         let cached = directory.join("binloom");
-        if cached_artifact_matches(
-            &cached,
-            &directory.join(".artifact-sha256"),
-            &artifact.sha256,
-        )? {
+        let matches = match binloom.artifacts.get(&platform_key) {
+            Some(artifact) => cached_artifact_matches(
+                &cached,
+                &directory.join(".artifact-sha256"),
+                &artifact.sha256,
+            )?,
+            None => false,
+        };
+        if matches {
             link_tool(root, "binloom", &binloom.version)?;
-        } else if cached.is_file() {
-            eprintln!("cached Binloom does not match binloom.lock; run ./binloomw install");
+        } else {
+            // A link left by an older lock would keep the wrong Binloom active.
+            let link = root.join(TOOLS_DIR).join(".bin/binloom");
+            if link.symlink_metadata().is_ok() {
+                fs::remove_file(&link)
+                    .with_context(|| format!("failed to remove {}", link.display()))?;
+            }
+            eprintln!(
+                "warning: Binloom {} from binloom.lock is not cached; run ./binloomw install",
+                binloom.version
+            );
         }
     }
 
