@@ -189,8 +189,15 @@ fn ensure_platform_specific_assets(
 ) -> anyhow::Result<()> {
     const HINT: &str =
         "use {os}, {arch} or {target} in the asset pattern so every platform locks its own asset";
+    // `v1.0.0` must go before `1.0.0`: the `v` would otherwise glue the bare
+    // version to an alphanumeric and keep it visible.
+    let tagged = if version.is_empty() {
+        String::new()
+    } else {
+        format!("v{version}")
+    };
     let platform_part = |asset: &release::ReleaseAsset| {
-        [name, version]
+        [tagged.as_str(), version, name]
             .iter()
             .filter(|part| !part.is_empty())
             .fold(asset.name.to_ascii_lowercase(), |rest, part| {
@@ -566,6 +573,14 @@ mod tests {
 
         ensure_platform_specific_assets("linux-tool", "1.0.0", &[(Platform::MacosAarch64, &macos)])
             .unwrap();
+
+        let tagged = asset("tool-v1.0.0-linux-macos-arm64.gz");
+        ensure_platform_specific_assets(
+            "tool",
+            "1.0.0-linux",
+            &[(Platform::MacosAarch64, &tagged)],
+        )
+        .unwrap();
 
         // Only whole tokens are blanked: a tool named `x` keeps `x86_64` visible.
         let linux = asset("x-1.0.0-linux-x86_64.tar.gz");

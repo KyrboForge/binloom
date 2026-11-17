@@ -38,6 +38,8 @@ fn is_sidecar_or_package(name: &str) -> bool {
         ".pub",
         ".md5",
         ".md5sum",
+        ".md5sums",
+        ".debug",
         ".b3",
         ".sbom",
         ".spdx",
@@ -879,13 +881,15 @@ mod tests {
     }
 
     #[test]
-    fn never_selects_any_sha_checksum_over_a_variant_archive() {
+    fn never_selects_any_checksum_or_debug_file_over_a_variant_archive() {
         for suffix in [
             ".sha224",
             ".sha384",
             ".sha384sum",
             ".sha256sums",
             ".sha3-256",
+            ".md5sums",
+            ".debug",
         ] {
             let release = Release {
                 tag: "v1.0.0".to_owned(),
