@@ -253,37 +253,160 @@ fn cached_artifact_matches(
     Ok(installed_sha256.trim() == expected_sha256)
 }
 
+const MAX_DECOMPRESSED_BYTES: u64 = 512 * 1024 * 1024;
+
 fn unpack(
+    format: ArtifactFormat,
+    name: &str,
+    source: impl Read + Seek,
+    destination: impl Write,
+) -> Result<()> {
+    unpack_with_limit(format, name, source, destination, MAX_DECOMPRESSED_BYTES)
+}
+
+fn unpack_with_limit(
     format: ArtifactFormat,
     name: &str,
     mut source: impl Read + Seek,
     mut destination: impl Write,
+    max_bytes: u64,
 ) -> Result<()> {
     match format {
-        ArtifactFormat::Raw => io::copy(&mut source, &mut destination)?,
-        ArtifactFormat::Gz => io::copy(&mut GzDecoder::new(source), &mut destination)?,
-        ArtifactFormat::TarGz => {
-            let index = select_tar_entry(&mut source, name)?;
-
+        ArtifactFormat::Raw => {
+            io::copy(&mut source, &mut destination)?;
+        }
+        ArtifactFormat::Gz => {
+            copy_limited(GzDecoder::new(source), &mut destination, max_bytes)?;
+        }
+        ArtifactFormat::Zip => {
+            let mut archive = zip::ZipArchive::new(source)?;
+            let index = select_zip_entry(&mut archive, name)?;
+            copy_limited(archive.by_index(index)?, &mut destination, max_bytes)?;
+        }
+        ArtifactFormat::TarGz
+        | ArtifactFormat::TarXz
+        | ArtifactFormat::TarZst
+        | ArtifactFormat::TarBz2 => {
+            let index = select_tar_entry(tar_decoder(format, &mut source)?, name, max_bytes)?;
             source.rewind()?;
-
-            let mut archive = Archive::new(GzDecoder::new(source));
-            let mut entry = archive
+            let mut archive =
+                Archive::new(LimitedReader::new(tar_decoder(format, source)?, max_bytes));
+            let entry = archive
                 .entries()?
                 .nth(index)
                 .context("archive entry disappeared")??;
-
-            io::copy(&mut entry, &mut destination)?
+            copy_limited(entry, &mut destination, max_bytes)?;
         }
-    };
-
+    }
     Ok(())
+}
+
+fn tar_decoder<'a>(format: ArtifactFormat, source: impl Read + 'a) -> Result<Box<dyn Read + 'a>> {
+    Ok(match format {
+        ArtifactFormat::TarGz => Box::new(GzDecoder::new(source)),
+        ArtifactFormat::TarXz => Box::new(lzma_rust2::XzReader::new_mem_limit(
+            source,
+            true,
+            (MAX_DECOMPRESSED_BYTES / 1024) as u32,
+        )),
+        ArtifactFormat::TarZst => Box::new(
+            ruzstd::decoding::StreamingDecoder::new_with_max_window_size(
+                source,
+                MAX_DECOMPRESSED_BYTES,
+            )?,
+        ),
+        ArtifactFormat::TarBz2 => Box::new(bzip2::read::MultiBzDecoder::new(source)),
+        _ => unreachable!("expected a compressed tar format"),
+    })
+}
+
+struct LimitedReader<R> {
+    source: R,
+    remaining: u64,
+    max_bytes: u64,
+}
+
+impl<R> LimitedReader<R> {
+    fn new(source: R, max_bytes: u64) -> Self {
+        Self {
+            source,
+            remaining: max_bytes,
+            max_bytes,
+        }
+    }
+}
+
+impl<R: Read> Read for LimitedReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        if self.remaining == 0 {
+            return match self.source.read(&mut [0])? {
+                0 => Ok(0),
+                _ => Err(io::Error::other(format!(
+                    "decompressed archive exceeds size limit of {} bytes",
+                    self.max_bytes
+                ))),
+            };
+        }
+        let length = buf
+            .len()
+            .min(self.remaining.min(usize::MAX as u64) as usize);
+        let read = self.source.read(&mut buf[..length])?;
+        self.remaining -= read as u64;
+        Ok(read)
+    }
+}
+
+fn copy_limited(mut source: impl Read, destination: &mut impl Write, max_bytes: u64) -> Result<()> {
+    io::copy(&mut source.by_ref().take(max_bytes), destination)?;
+    ensure!(
+        source.read(&mut [0])? == 0,
+        "decompressed entry exceeds size limit of {max_bytes} bytes"
+    );
+    Ok(())
+}
+
+fn select_zip_entry<R: Read + Seek>(archive: &mut zip::ZipArchive<R>, name: &str) -> Result<usize> {
+    let mut files = Vec::new();
+    let mut matches = Vec::new();
+    for index in 0..archive.len() {
+        let entry = archive.by_index_raw(index)?;
+        let entry_name = entry.name()?;
+        let path = Path::new(entry_name.as_ref());
+        ensure!(
+            entry.enclosed_name().is_some()
+                && path
+                    .components()
+                    .all(|component| matches!(component, Component::Normal(_) | Component::CurDir)),
+            "unsafe archive entry: {}",
+            path.display()
+        );
+        let kind = entry.unix_mode().unwrap_or(0) & 0o170000;
+        ensure!(
+            !entry.is_symlink() && matches!(kind, 0 | 0o100000 | 0o040000),
+            "unsupported archive entry {}: mode {kind:o}",
+            path.display()
+        );
+        if entry.is_file() {
+            if path.file_name() == Some(name.as_ref()) {
+                matches.push(index);
+            }
+            files.push(index);
+        }
+    }
+    match (matches.as_slice(), files.as_slice()) {
+        ([index], _) | ([], [index]) => Ok(*index),
+        ([], _) => bail!("archive has no file named {name}"),
+        _ => bail!("archive has multiple files named {name}"),
+    }
 }
 
 /// Validates every archive entry and picks the executable without touching the
 /// filesystem: a regular file named after the tool, or the archive's only file.
-fn select_tar_entry(source: impl Read, name: &str) -> Result<usize> {
-    let mut archive = Archive::new(GzDecoder::new(source));
+fn select_tar_entry(source: impl Read, name: &str, max_bytes: u64) -> Result<usize> {
+    let mut archive = Archive::new(LimitedReader::new(source, max_bytes));
     let mut files = Vec::new();
     let mut matches = Vec::new();
 
@@ -300,6 +423,12 @@ fn select_tar_entry(source: impl Read, name: &str) -> Result<usize> {
 
         match entry.header().entry_type() {
             EntryType::Regular => {
+                // Validation consumes unselected entries too. Reject oversized
+                // entries before the tar iterator can decompress and skip them.
+                ensure!(
+                    entry.size() <= max_bytes,
+                    "decompressed entry exceeds size limit of {max_bytes} bytes"
+                );
                 if path.file_name() == Some(name.as_ref()) {
                     matches.push(index);
                 }
@@ -442,6 +571,285 @@ source = "github:owner/tool"
         }
 
         builder.into_inner().unwrap().finish().unwrap()
+    }
+
+    fn compressed_tar(format: &str, entries: &[(&str, EntryType, &[u8])]) -> Vec<u8> {
+        let mut tar = Vec::new();
+        GzDecoder::new(io::Cursor::new(tar_gz(entries)))
+            .read_to_end(&mut tar)
+            .unwrap();
+        match format {
+            "tar.gz" => tar_gz(entries),
+            "tar.xz" => {
+                let mut encoder =
+                    lzma_rust2::XzWriter::new(Vec::new(), lzma_rust2::XzOptions::with_preset(0))
+                        .unwrap();
+                encoder.write_all(&tar).unwrap();
+                encoder.finish().unwrap()
+            }
+            "tar.zst" => ruzstd::encoding::compress_to_vec(
+                tar.as_slice(),
+                ruzstd::encoding::CompressionLevel::Fastest,
+            ),
+            "tar.bz2" => {
+                let mut encoder =
+                    bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::fast());
+                encoder.write_all(&tar).unwrap();
+                encoder.finish().unwrap()
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn zip_archive(entries: &[(&str, EntryType, &[u8])]) -> Vec<u8> {
+        let mut archive = zip::ZipWriter::new(io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        for (path, kind, data) in entries {
+            match *kind {
+                EntryType::Directory => archive.add_directory(*path, options).unwrap(),
+                EntryType::Symlink => archive.add_symlink(*path, "tool", options).unwrap(),
+                _ => {
+                    archive.start_file(*path, options).unwrap();
+                    archive.write_all(data).unwrap();
+                }
+            }
+        }
+        archive.finish().unwrap().into_inner()
+    }
+
+    fn archive_fixture(extension: &str, entries: &[(&str, EntryType, &[u8])]) -> Vec<u8> {
+        if extension == "zip" {
+            zip_archive(entries)
+        } else {
+            compressed_tar(extension, entries)
+        }
+    }
+
+    #[test]
+    fn unpacks_new_archive_formats_and_selects_only_the_tool() {
+        for extension in ["tar.xz", "zip", "tar.zst", "tar.bz2"] {
+            let format = ArtifactFormat::try_from(format!("tool.{extension}").as_str()).unwrap();
+            for entries in [
+                &[("tool", EntryType::Regular, &b"binary"[..])][..],
+                &[("other", EntryType::Regular, &b"binary"[..])][..],
+                &[
+                    ("./dist/", EntryType::Directory, &b""[..]),
+                    ("./dist/README.md", EntryType::Regular, b"docs"),
+                    ("./dist/tool", EntryType::Regular, b"binary"),
+                    ("./dist/LICENSE", EntryType::Regular, b"license"),
+                ][..],
+            ] {
+                let mut output = Vec::new();
+                unpack(
+                    format,
+                    "tool",
+                    io::Cursor::new(archive_fixture(extension, entries)),
+                    &mut output,
+                )
+                .unwrap();
+                assert_eq!(output, b"binary", "{extension}");
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_zstd_frame_with_oversized_window() {
+        // Zstandard magic, frame descriptor, and a 1 GiB window descriptor.
+        let frame = [0x28, 0xb5, 0x2f, 0xfd, 0x00, 0xa0];
+        let error = tar_decoder(ArtifactFormat::TarZst, io::Cursor::new(frame))
+            .err()
+            .expect("oversized window must be rejected");
+        assert!(format!("{error:#}").to_lowercase().contains("window"));
+    }
+
+    #[test]
+    fn rejects_oversized_tar_long_name_metadata() {
+        let mut header = tar::Header::new_gnu();
+        header.set_path("././@LongLink").unwrap();
+        header.set_entry_type(EntryType::GNULongName);
+        header.set_size(4096);
+        header.set_mode(0o644);
+        header.set_cksum();
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(header.as_bytes()).unwrap();
+        encoder.write_all(&vec![b'a'; 4096]).unwrap();
+        let archive = encoder.finish().unwrap();
+        let error = unpack_with_limit(
+            ArtifactFormat::TarGz,
+            "tool",
+            io::Cursor::new(archive),
+            Vec::new(),
+            1024,
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("size limit of 1024 bytes"));
+    }
+
+    #[test]
+    fn unpacks_tar_with_long_name_under_limit() {
+        let path = format!("{}/tool", "a".repeat(120));
+        let mut builder = tar::Builder::new(GzEncoder::new(Vec::new(), Compression::default()));
+        let mut header = tar::Header::new_gnu();
+        header.set_size(6);
+        header.set_mode(0o755);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, path, &b"binary"[..])
+            .unwrap();
+        let archive = builder.into_inner().unwrap().finish().unwrap();
+        let mut output = Vec::new();
+        unpack_with_limit(
+            ArtifactFormat::TarGz,
+            "tool",
+            io::Cursor::new(archive),
+            &mut output,
+            4096,
+        )
+        .unwrap();
+        assert_eq!(output, b"binary");
+    }
+
+    #[test]
+    fn unpacks_shellcheck_v0_11_0_tar_xz() {
+        let format = ArtifactFormat::try_from("shellcheck-v0.11.0.darwin.aarch64.tar.xz").unwrap();
+        let archive = compressed_tar(
+            "tar.xz",
+            &[
+                ("shellcheck-v0.11.0/", EntryType::Directory, b""),
+                (
+                    "shellcheck-v0.11.0/LICENSE.txt",
+                    EntryType::Regular,
+                    b"license",
+                ),
+                ("shellcheck-v0.11.0/README.txt", EntryType::Regular, b"docs"),
+                (
+                    "shellcheck-v0.11.0/shellcheck",
+                    EntryType::Regular,
+                    b"shellcheck binary",
+                ),
+            ],
+        );
+        let mut output = Vec::new();
+        unpack(format, "shellcheck", io::Cursor::new(archive), &mut output).unwrap();
+        assert_eq!(output, b"shellcheck binary");
+    }
+
+    #[test]
+    fn rejects_unsafe_and_unselectable_new_archives_before_writing() {
+        for extension in ["tar.xz", "zip", "tar.zst", "tar.bz2"] {
+            let format = ArtifactFormat::try_from(format!("tool.{extension}").as_str()).unwrap();
+            for (entries, message) in [
+                (
+                    &[("../tool", EntryType::Regular, &b"x"[..])][..],
+                    "unsafe archive entry",
+                ),
+                (
+                    &[("dist/../../tool", EntryType::Regular, &b"x"[..])][..],
+                    "unsafe archive entry",
+                ),
+                (
+                    &[("dist/../tool", EntryType::Regular, &b"x"[..])][..],
+                    "unsafe archive entry",
+                ),
+                (
+                    &[("/usr/bin/tool", EntryType::Regular, &b"x"[..])][..],
+                    "unsafe archive entry",
+                ),
+                (
+                    &[("tool", EntryType::Symlink, &b""[..])][..],
+                    "unsupported archive entry",
+                ),
+                (
+                    &[
+                        ("tool", EntryType::Regular, &b"binary"[..]),
+                        ("../escape", EntryType::Regular, b"x"),
+                    ][..],
+                    "unsafe archive entry",
+                ),
+                (
+                    &[
+                        ("tool", EntryType::Regular, &b"binary"[..]),
+                        ("link", EntryType::Symlink, b""),
+                    ][..],
+                    "unsupported archive entry",
+                ),
+                (
+                    &[
+                        ("README", EntryType::Regular, &b"docs"[..]),
+                        ("LICENSE", EntryType::Regular, b"license"),
+                    ][..],
+                    "archive has no file named tool",
+                ),
+                (
+                    &[
+                        ("a/tool", EntryType::Regular, &b"one"[..]),
+                        ("b/tool", EntryType::Regular, b"two"),
+                    ][..],
+                    "archive has multiple files named tool",
+                ),
+                (&[][..], "archive has no file named tool"),
+            ] {
+                let mut output = Vec::new();
+                let error = unpack(
+                    format,
+                    "tool",
+                    io::Cursor::new(archive_fixture(extension, entries)),
+                    &mut output,
+                )
+                .unwrap_err();
+                assert!(
+                    error.to_string().contains(message),
+                    "{extension}: {error:#}"
+                );
+                assert!(output.is_empty(), "wrote data before rejecting {extension}");
+            }
+        }
+    }
+
+    #[test]
+    fn bounds_decompression_for_every_compressed_format() {
+        // Highly compressible local fixtures exercise the actual decoders with
+        // a small private limit rather than allocating a 512 MiB executable.
+        const LIMIT: u64 = 4096;
+        for extension in ["gz", "tar.gz", "tar.xz", "zip", "tar.zst", "tar.bz2"] {
+            let format = ArtifactFormat::try_from(format!("tool.{extension}").as_str()).unwrap();
+            let valid_length = if extension.starts_with("tar.") {
+                LIMIT - 1024
+            } else {
+                LIMIT
+            };
+            for length in [valid_length, LIMIT + 1] {
+                let payload = vec![0; length as usize];
+                let archive = if extension == "gz" {
+                    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+                    encoder.write_all(&payload).unwrap();
+                    encoder.finish().unwrap()
+                } else {
+                    archive_fixture(extension, &[("tool", EntryType::Regular, &payload)])
+                };
+                assert!(
+                    archive.len() < LIMIT as usize,
+                    "fixture is not compressed: {extension}"
+                );
+                let mut output = Vec::new();
+                let result =
+                    unpack_with_limit(format, "tool", io::Cursor::new(archive), &mut output, LIMIT);
+                if length == valid_length {
+                    result.unwrap();
+                    assert_eq!(output, payload, "{extension}");
+                } else {
+                    let error = result.unwrap_err();
+                    assert!(
+                        error
+                            .to_string()
+                            .contains("exceeds size limit of 4096 bytes"),
+                        "{extension}: {error:#}"
+                    );
+                    assert!(output.len() <= LIMIT as usize, "{extension}");
+                }
+            }
+        }
     }
 
     fn unpack_tar(entries: &[(&str, EntryType, &[u8])]) -> Result<Vec<u8>> {
