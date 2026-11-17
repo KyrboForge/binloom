@@ -147,7 +147,8 @@ Answering `y` trusts the current project and appends a marked block to `~/.bashr
 selected from `$SHELL`. Existing contents and permissions are preserved; an existing profile gets a sibling
 `.binloom.bak` backup before atomic replacement. `HOME`, `ZDOTDIR` and `XDG_CONFIG_HOME`
 are resolved like the shell does; symlinked profile files or directories below them are rejected. The block runs the executable used during setup and does nothing if it is
-missing; no global binary is installed.
+missing; no global binary is installed. Bash login shells read `~/.bash_profile`, which must
+source `~/.bashrc` for the hook to load.
 Keep that cached executable available, or regenerate the hook from another
 available Binloom.
 
