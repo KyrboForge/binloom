@@ -214,8 +214,8 @@ impl TryFrom<&str> for ArtifactFormat {
         // Any other `.tar.<compression>` is unsupported, so new compressions
         // never parse as raw executables.
         if [
-            ".zip", ".tar", ".xz", ".txz", ".zst", ".zstd", ".bz2", ".tbz2", ".7z", ".rar", ".lz4",
-            ".lz", ".lzma", ".br", ".z",
+            ".zip", ".tar", ".xz", ".txz", ".zst", ".zstd", ".bz2", ".tbz2", ".tbz", ".7z", ".rar",
+            ".lz4", ".lz", ".lzma", ".br", ".z",
         ]
         .iter()
         .any(|suffix| ends_with(suffix))
@@ -486,6 +486,7 @@ artifacts = {}
         assert!(ArtifactFormat::try_from("tool.ZIP").is_err());
         for unsupported in [
             "tool.tar.lz4",
+            "tool.tbz",
             "tool.tar.LZMA",
             "tool.tar.br",
             "tool.lz4",
