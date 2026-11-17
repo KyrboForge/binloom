@@ -48,6 +48,11 @@ pub(super) fn install_from(root: &Path, client: &download::Client) -> Result<()>
     let lockfile = Lockfile::try_from(lock_path.as_path())?;
 
     manifest.ensure_matches_lockfile(&lockfile)?;
+
+    ensure!(
+        !lockfile.tools.contains_key("binloom"),
+        "tool name binloom is reserved for the project-locked Binloom binary"
+    );
     ensure!(!lockfile.tools.is_empty(), "no tools in binloom.lock");
 
     let platform = Platform::current()?;
@@ -122,6 +127,17 @@ pub(super) fn install_from(root: &Path, client: &download::Client) -> Result<()>
         link_tool(root, name, &tool.version)?;
 
         println!("Installed {name} {}", tool.version);
+    }
+
+    if let Some(binloom) = &lockfile.binloom
+        && root
+            .join(TOOLS_DIR)
+            .join("binloom")
+            .join(&binloom.version)
+            .join("binloom")
+            .is_file()
+    {
+        link_tool(root, "binloom", &binloom.version)?;
     }
 
     Ok(())
