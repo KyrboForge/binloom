@@ -84,7 +84,13 @@ fn root_at(path: Option<&Path>) -> Result<PathBuf> {
 fn config_dir() -> Result<PathBuf> {
     let base = match env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
         Some(value) => PathBuf::from(value),
-        None => PathBuf::from(env::var_os("HOME").context("HOME is not set")?).join(".config"),
+        None => {
+            let home = PathBuf::from(env::var_os("HOME").context("HOME is not set")?);
+            ensure!(home.is_absolute(), "HOME must be absolute");
+            let base = home.canonicalize()?.join(".config");
+            reject_symlink(&base)?;
+            base
+        }
     };
     ensure!(base.is_absolute(), "HOME/XDG_CONFIG_HOME must be absolute");
     Ok(base.join("binloom"))
@@ -272,14 +278,41 @@ fn init(shell: Shell) -> Result<()> {
 }
 
 const POSIX_HOOK: &str = r#"
+_binloom_deactivate() {
+    if [ "${BINLOOM_PATH_ADDED-}" = 1 ] && [ -n "${BINLOOM_ACTIVE_ROOT-}" ]; then
+        _binloom_rest=${PATH-}
+        _binloom_new=
+        _binloom_separator=
+        _binloom_removed=0
+        while :; do
+            _binloom_part=${_binloom_rest%%:*}
+            if [ "$_binloom_removed" = 0 ] && [ "$_binloom_part" = "$BINLOOM_ACTIVE_ROOT/.tools/.bin" ]; then
+                _binloom_removed=1
+            else
+                _binloom_new=$_binloom_new$_binloom_separator$_binloom_part
+                _binloom_separator=:
+            fi
+            case $_binloom_rest in
+                *:*) _binloom_rest=${_binloom_rest#*:} ;;
+                *) break ;;
+            esac
+        done
+        export PATH=$_binloom_new
+    fi
+    unset BINLOOM_ACTIVE_ROOT BINLOOM_PATH_ADDED
+}
 _binloom_hook() {
     if [ "${_BINLOOM_LAST_PWD+x}" = x ] && [ "$_BINLOOM_LAST_PWD" = "$PWD" ]; then
         return 0
     fi
     _BINLOOM_LAST_PWD=$PWD
+    if [ ! -x "$_BINLOOM_EXE" ]; then
+        _binloom_deactivate
+        return 0
+    fi
     case $- in
-        *i*) _binloom_env=$("$_BINLOOM_EXE" shell hook-env --shell @SHELL@ --interactive) ;;
-        *) _binloom_env=$("$_BINLOOM_EXE" shell hook-env --shell @SHELL@) ;;
+        *i*) _binloom_env=$("$_BINLOOM_EXE" shell hook-env --shell @SHELL@ --interactive) || { _binloom_deactivate; return 0; } ;;
+        *) _binloom_env=$("$_BINLOOM_EXE" shell hook-env --shell @SHELL@) || { _binloom_deactivate; return 0; } ;;
     esac
     eval "$_binloom_env"
 }
@@ -293,10 +326,10 @@ case "$(declare -p PROMPT_COMMAND 2>/dev/null)" in
             *) PROMPT_COMMAND+=(_binloom_hook) ;;
         esac ;;
     *)
+        # This branch handles scalar PROMPT_COMMAND; the branch above handles arrays.
+        # shellcheck disable=SC2178,SC2128
         case ";${PROMPT_COMMAND-};" in
             *';_binloom_hook;'*) ;;
-            # This branch handles scalar PROMPT_COMMAND; the branch above handles arrays.
-            # shellcheck disable=SC2178,SC2128
             *) PROMPT_COMMAND="_binloom_hook${PROMPT_COMMAND:+; $PROMPT_COMMAND}" ;;
         esac ;;
 esac
@@ -320,7 +353,21 @@ function _binloom_hook --on-variable PWD
     if status is-interactive
         set flags --interactive
     end
-    "$_BINLOOM_EXE" shell hook-env --shell fish $flags | source
+    if test -x "$_BINLOOM_EXE"
+        set -l activation ("$_BINLOOM_EXE" shell hook-env --shell fish $flags)
+        if test $status -eq 0
+            printf '%s\n' $activation | source
+            return
+        end
+    end
+    if test "$BINLOOM_PATH_ADDED" = 1; and set -q BINLOOM_ACTIVE_ROOT
+        set -l index (contains --index -- "$BINLOOM_ACTIVE_ROOT/.tools/.bin" $PATH)
+        if test -n "$index"
+            set -eg PATH[$index]
+        end
+    end
+    set -e BINLOOM_ACTIVE_ROOT
+    set -e BINLOOM_PATH_ADDED
 end
 _binloom_hook
 "#;
@@ -472,6 +519,16 @@ fn prompt_setup(
     if !answer.trim().eq_ignore_ascii_case("y") {
         return write_private(&marker, "no\n");
     }
+    // Consent can take arbitrarily long: recheck redirects and preserve edits
+    // made by the user (or another setup process) while the prompt was open.
+    let rc = profile_path(setup.home, setup.shell)?;
+    let existing = read_optional(&rc)?;
+    let configured = existing.contains(BLOCK_BEGIN);
+    ensure!(
+        !configured || existing.contains(BLOCK_END),
+        "incomplete Binloom rc block in {}",
+        rc.display()
+    );
     let root = setup.root.canonicalize()?;
     ensure!(
         root.join(MANIFEST).is_file(),
@@ -479,7 +536,9 @@ fn prompt_setup(
     );
     let block = rc_block(setup.shell, setup.executable)?;
     set_trust(setup.config, &root, true)?;
-    append_rc(&rc, &existing, &block)?;
+    if !configured {
+        append_rc(&rc, &existing, &block)?;
+    }
     write_private(&marker, "yes\n")?;
     writeln!(
         output,
@@ -493,6 +552,50 @@ fn prompt_setup(
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn consent_keeps_profile_edits_made_while_waiting_for_the_answer() {
+        struct EditingReader {
+            rc: PathBuf,
+            input: Cursor<&'static [u8]>,
+        }
+        impl io::Read for EditingReader {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                self.input.read(buffer)
+            }
+        }
+        impl io::BufRead for EditingReader {
+            fn fill_buf(&mut self) -> io::Result<&[u8]> {
+                fs::write(&self.rc, "# edited during the prompt\n")?;
+                self.input.fill_buf()
+            }
+            fn consume(&mut self, amount: usize) {
+                self.input.consume(amount);
+            }
+        }
+        let home = tempfile::tempdir().unwrap();
+        let rc = home.path().join(".bashrc");
+        fs::write(&rc, "# original\n").unwrap();
+        fs::write(home.path().join(MANIFEST), "").unwrap();
+        let config = home.path().join(".config/binloom");
+        let setup = ActivationSetup {
+            home: home.path(),
+            config: &config,
+            shell: Shell::Bash,
+            root: home.path(),
+            executable: Path::new("/cached/binloom"),
+        };
+        let mut input = EditingReader {
+            rc: rc.clone(),
+            input: Cursor::new(b"y\n"),
+        };
+        prompt_setup(&mut input, &mut Vec::new(), &setup).unwrap();
+        assert!(
+            fs::read_to_string(rc)
+                .unwrap()
+                .starts_with("# edited during the prompt\n")
+        );
+    }
 
     #[test]
     fn consent_yes_preserves_rc_backs_it_up_trusts_and_appends_once() {
@@ -540,7 +643,7 @@ mod tests {
                 fs::read_to_string(config.join("activation-prompt")).unwrap(),
                 "yes\n"
             );
-            assert_eq!(read_trusted(&config).unwrap(), [root.clone()]);
+            assert_eq!(read_trusted(&config).unwrap(), std::slice::from_ref(&root));
             let mut second = Vec::new();
             prompt_setup(&mut Cursor::new(b"y\n"), &mut second, &setup).unwrap();
             assert!(second.is_empty());

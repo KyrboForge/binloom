@@ -26,7 +26,17 @@ impl Fixture {
 
     fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> Command {
         let mut cmd = Command::new(program);
+        let mut paths = vec![
+            Path::new(env!("CARGO_BIN_EXE_binloom"))
+                .parent()
+                .unwrap()
+                .to_path_buf(),
+        ];
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
         cmd.env("HOME", self.home.path())
+            .env("PATH", std::env::join_paths(paths).unwrap())
             .env("XDG_CONFIG_HOME", self.home.path().join(".config"))
             .env("BIN", env!("CARGO_BIN_EXE_binloom"))
             .env("ROOT", &self.root)
@@ -239,4 +249,68 @@ fn trust_does_not_follow_config_symlinks() {
     symlink(&outside, config.join("binloom")).unwrap();
     assert!(!fixture.run(&["shell", "trust"]).status.success());
     assert!(!Path::new(&outside).join("trusted").exists());
+}
+
+#[test]
+fn hook_deactivates_if_its_executable_disappears() {
+    let fixture = Fixture::new();
+    fixture.trust();
+    success(fixture.bash(
+        r#"
+        set -e
+        original=$PATH
+        eval "$("$BIN" shell init --shell bash)"
+        test "$PATH" = "$ROOT/.tools/.bin:$original"
+        _BINLOOM_EXE=/does/not/exist
+        cd "$HOME"
+        _binloom_hook
+        test "$PATH" = "$original"
+        test -z "${BINLOOM_ACTIVE_ROOT-}"
+    "#,
+    ));
+}
+
+#[test]
+fn zsh_directory_hook_activates_and_deactivates() {
+    let fixture = Fixture::new();
+    if fixture.command("zsh").arg("--version").output().is_err() {
+        eprintln!("zsh unavailable; native zsh execution skipped");
+        return;
+    }
+    fixture.trust();
+    success(
+        fixture
+            .command("zsh")
+            .args([
+                "-f",
+                "-c",
+                r#"
+        set -e
+        original=$PATH
+        eval "$("$BIN" shell init --shell zsh)"
+        eval "$("$BIN" shell init --shell zsh)"
+        test "$PATH" = "$ROOT/.tools/.bin:$original"
+        cd "$HOME"
+        test "$PATH" = "$original"
+        test -z "${BINLOOM_ACTIVE_ROOT-}"
+    "#,
+            ])
+            .output()
+            .unwrap(),
+    );
+}
+
+#[test]
+fn fallback_config_directory_cannot_redirect_writes_outside_home() {
+    let fixture = Fixture::new();
+    let outside = tempfile::tempdir().unwrap();
+    symlink(outside.path(), fixture.home.path().join(".config")).unwrap();
+    let output = fixture
+        .command(env!("CARGO_BIN_EXE_binloom"))
+        .env_remove("XDG_CONFIG_HOME")
+        .args(["shell", "trust"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(!outside.path().join("binloom/trusted").exists());
 }

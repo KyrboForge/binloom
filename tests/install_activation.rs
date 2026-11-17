@@ -100,3 +100,30 @@ fn install_rejects_reserved_binloom_tool_without_overwriting_it() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("reserved"));
     assert_eq!(fs::read_to_string(link).unwrap(), "keep existing command");
 }
+
+#[test]
+fn install_links_binloom_in_a_project_without_other_tools() {
+    let home = tempfile::tempdir().unwrap();
+    project(home.path());
+    for file in ["binloom.toml", "binloom.lock"] {
+        let path = home.path().join(file);
+        let content = fs::read_to_string(&path).unwrap();
+        fs::write(path, content.split("[tools.tool]").next().unwrap()).unwrap();
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_binloom"))
+        .arg("install")
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", home.path().join(".config"))
+        .current_dir(home.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_link(home.path().join(".tools/.bin/binloom")).unwrap(),
+        std::path::Path::new("../binloom/1.0.0/binloom")
+    );
+}

@@ -53,7 +53,10 @@ pub(super) fn install_from(root: &Path, client: &download::Client) -> Result<()>
         !lockfile.tools.contains_key("binloom"),
         "tool name binloom is reserved for the project-locked Binloom binary"
     );
-    ensure!(!lockfile.tools.is_empty(), "no tools in binloom.lock");
+    ensure!(
+        !lockfile.tools.is_empty() || lockfile.binloom.is_some(),
+        "no tools in binloom.lock"
+    );
 
     let platform = Platform::current()?;
     let platform_key = platform.to_string();
