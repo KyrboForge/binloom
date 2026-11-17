@@ -1,4 +1,5 @@
 use crate::common::warn;
+use crate::domain::lockfile::ArtifactFormat;
 use crate::domain::platform::{Platform, contains_token};
 use crate::download;
 use crate::download::Client;
@@ -106,6 +107,15 @@ impl Release {
                     && platform.arch_in(&name)
             })
             .collect();
+
+        // Formats the installer cannot unpack must not win the later
+        // preferences over an installable `.tar.gz`.
+        let matches = Self::prefer(
+            matches,
+            "supported asset format",
+            |asset| ArtifactFormat::try_from(asset.name.as_str()).is_ok(),
+            emitted_warnings,
+        );
         let gzip_matches = matches
             .iter()
             .copied()
@@ -768,6 +778,32 @@ mod tests {
             .unwrap();
 
         assert_eq!(matched.name, "shellcheck-v0.11.0.linux.x86_64.tar.gz");
+    }
+
+    #[test]
+    fn prefers_supported_tar_gz_over_unsupported_zip_and_tar_xz() {
+        let release = Release {
+            tag: "v1.0.0".to_owned(),
+            published_at: None,
+            assets: vec![
+                asset("tool-x86_64-unknown-linux-musl.zip"),
+                asset("tool-x86_64-unknown-linux-musl.tar.xz"),
+                asset("tool-x86_64-unknown-linux-musl.tar.gz"),
+            ],
+        };
+        let mut warnings = BTreeSet::new();
+
+        let matched = release
+            .find_asset("tool", Platform::LinuxX86_64, &mut warnings)
+            .unwrap();
+
+        assert_eq!(matched.name, "tool-x86_64-unknown-linux-musl.tar.gz");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("supported asset format")),
+            "{warnings:?}"
+        );
     }
 
     #[test]
