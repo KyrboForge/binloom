@@ -212,7 +212,7 @@ fn hook_hints_once_per_root_and_does_not_invoke_on_unchanged_pwd() {
     );
     assert_eq!(
         String::from_utf8_lossy(&output.stderr)
-            .matches("' shell trust '")
+            .matches(" shell trust ")
             .count(),
         1
     );

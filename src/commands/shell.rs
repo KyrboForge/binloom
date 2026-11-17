@@ -229,9 +229,9 @@ fn hook_env(shell: Shell, interactive: bool) -> Result<()> {
         } else if interactive && !warned.lines().any(|line| Path::new(line) == root) {
             // The wrapper-only setup has no `binloom` on PATH until a project is trusted.
             eprintln!(
-                "binloom: project not trusted; run '{}' shell trust '{}'",
-                env::current_exe()?.display(),
-                root.display()
+                "binloom: project not trusted; run {} shell trust {}",
+                shell.quote(path_text(&env::current_exe()?)?),
+                shell.quote(path_text(&root)?)
             );
             warned.push_str(path_text(&root)?);
             warned.push('\n');
