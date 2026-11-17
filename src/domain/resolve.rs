@@ -4,10 +4,10 @@ use crate::domain::lockfile::{
 };
 use crate::domain::manifest::Tool;
 use crate::domain::platform::Platform;
-use crate::domain::sources::{Source, release};
+use crate::domain::sources::{Source, bare_version, release};
 use crate::download;
 use crate::download::Client;
-use anyhow::{Context, bail};
+use anyhow::{Context, bail, ensure};
 use std::collections::{BTreeMap, BTreeSet};
 use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime};
@@ -115,13 +115,16 @@ fn resolve_checksum(
 }
 
 fn version_from_tag(tag: &str, name: &str) -> anyhow::Result<String> {
-    let version = tag
-        .strip_prefix('v')
-        .or_else(|| tag.strip_prefix(name)?.strip_prefix('-'))
-        .unwrap_or(tag);
+    // Same stripping as `binloom add`, so the lock matches the manifest.
+    let version = bare_version(name, tag);
 
     validate_version(version)
         .with_context(|| format!("release tag {tag} contains an unsafe version"))?;
+    // `tool-tool-nightly` strips to `tool-nightly`, which the manifest would reject.
+    ensure!(
+        bare_version(name, version) == version,
+        "release tag {tag} does not name a stable version for {name}"
+    );
 
     Ok(version.to_owned())
 }
@@ -311,9 +314,11 @@ fn resolve_binloom_release(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::sources::CargoSource;
+    use crate::domain::manifest::Manifest;
     use crate::domain::sources::release::{Release, ReleaseAsset};
+    use crate::domain::sources::{CargoSource, release_tags};
     use crate::http_fixture::{Response, Server};
+    use std::fs;
 
     fn asset(name: &str) -> ReleaseAsset {
         ReleaseAsset {
@@ -344,11 +349,57 @@ mod tests {
     }
 
     #[test]
+    fn added_versions_round_trip_through_tag_lookup_to_the_lock() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("binloom.toml");
+
+        for (name, input) in [
+            ("tool", "nightly"),
+            ("tool", "tool-nightly"),
+            ("tool", "vnightly"),
+            ("tool", "latest-build"),
+            ("tool", "2024-01-01"),
+            ("tool", "v1.2.3"),
+            ("tool", "tool-v1.2.3"),
+            ("jq", "jq-1.8.2"),
+            ("vtool", "vtool-1.2.3"),
+        ] {
+            // What `binloom add` writes to binloom.toml.
+            let manifest_version = bare_version(name, input);
+            fs::write(
+                &path,
+                format!(
+                    "manifest-version = 1\n\n[binloom]\nversion = \"0.1.0\"\n\n[tools.{name}]\nversion = \"{manifest_version}\"\nsource = \"github:owner/{name}\"\n"
+                ),
+            )
+            .unwrap();
+            let manifest = Manifest::try_from(path.as_path()).unwrap();
+            let tags = release_tags(name, &manifest.tools[name].version);
+
+            assert!(tags.contains(&input.to_owned()), "{input}: {tags:?}");
+            for tag in tags {
+                assert_eq!(
+                    version_from_tag(&tag, name).unwrap(),
+                    manifest.tools[name].version,
+                    "{input} resolved as {tag}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn rejects_unsafe_release_tags() {
         assert_eq!(version_from_tag("v1.2.3", "tool").unwrap(), "1.2.3");
         assert_eq!(version_from_tag("1.2.3", "tool").unwrap(), "1.2.3");
 
-        for tag in ["v/tmp/x", "v../../x", r"v..\..\x", "v.hidden"] {
+        for tag in [
+            "v/tmp/x",
+            "v../../x",
+            r"v..\..\x",
+            ".hidden",
+            "tool-tool-nightly",
+            "tool-tool-v1.2.3",
+        ] {
             assert!(version_from_tag(tag, "tool").is_err(), "{tag:?}");
         }
     }
@@ -552,6 +603,8 @@ mod tests {
             version_from_tag("cargo-nextest-0.9.143", "cargo-nextest").unwrap(),
             "0.9.143"
         );
+        assert_eq!(version_from_tag("tool-v1.2.3", "tool").unwrap(), "1.2.3");
+        assert_eq!(version_from_tag("vtool-1.2.3", "vtool").unwrap(), "1.2.3");
     }
 
     #[test]
