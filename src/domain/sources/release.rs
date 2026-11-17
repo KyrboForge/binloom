@@ -181,6 +181,17 @@ impl Release {
             matches
         };
 
+        // A raw executable always installs; an archive may not contain a
+        // file named after the tool (yq ships `yq_linux_amd64` plus man pages).
+        // It runs before alias preferences so an `amd64` raw binary is not
+        // dropped in favour of an `x86_64` archive.
+        let matches = Self::prefer(
+            matches,
+            "directly installable asset over an archive",
+            |asset| !is_archive(&asset.name),
+            emitted_warnings,
+        );
+
         let matches = Self::prefer(
             matches,
             &format!("OS alias {}", platform.os_aliases()[0]),
@@ -206,15 +217,6 @@ impl Release {
             matches,
             "single-file gzip format",
             |asset| is_single_file_gzip(&asset.name),
-            emitted_warnings,
-        );
-
-        // A raw executable always installs; an archive may not contain a
-        // file named after the tool (yq ships `yq_linux_amd64` plus man pages).
-        let matches = Self::prefer(
-            matches,
-            "directly installable asset over an archive",
-            |asset| !is_archive(&asset.name),
             emitted_warnings,
         );
 
@@ -1134,5 +1136,20 @@ mod tests {
         }
 
         assert_eq!(emitted_warnings.len(), 1);
+    }
+
+    #[test]
+    fn prefers_raw_binary_over_archive_with_preferred_alias() {
+        let release = Release {
+            tag: "v1.0.0".to_owned(),
+            published_at: None,
+            assets: vec![asset("tool-linux-amd64"), asset("tool-linux-x86_64.tar.gz")],
+        };
+
+        let matched = release
+            .find_asset("tool", Platform::LinuxX86_64, &mut BTreeSet::new())
+            .unwrap();
+
+        assert_eq!(matched.name, "tool-linux-amd64");
     }
 }
