@@ -83,11 +83,7 @@ fn root_at(path: Option<&Path>) -> Result<PathBuf> {
 
 fn config_dir() -> Result<PathBuf> {
     let base = match env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
-        Some(value) => {
-            let base = PathBuf::from(value);
-            reject_symlink(&base)?;
-            base
-        }
+        Some(value) => resolve_base(Path::new(&value))?,
         None => {
             let home = PathBuf::from(env::var_os("HOME").context("HOME is not set")?);
             ensure!(home.is_absolute(), "HOME must be absolute");
@@ -98,6 +94,31 @@ fn config_dir() -> Result<PathBuf> {
     };
     ensure!(base.is_absolute(), "HOME/XDG_CONFIG_HOME must be absolute");
     Ok(base.join("binloom"))
+}
+
+/// Resolve the ancestors of a user-supplied directory like HOME; the directory itself and any
+/// components that do not exist yet must not be symlinks.
+fn resolve_base(path: &Path) -> Result<PathBuf> {
+    ensure!(
+        path.is_absolute(),
+        "directory must be absolute: {}",
+        path.display()
+    );
+    reject_symlink(path)?;
+    let mut existing = path;
+    let mut missing = Vec::new();
+    while fs::symlink_metadata(existing).is_err() {
+        missing.push(existing.file_name().context("directory has no root")?);
+        existing = existing.parent().context("directory has no root")?;
+    }
+    let mut resolved = existing
+        .canonicalize()
+        .with_context(|| format!("cannot resolve {}", existing.display()))?;
+    for component in missing.into_iter().rev() {
+        resolved.push(component);
+        reject_symlink(&resolved)?;
+    }
+    Ok(resolved)
 }
 
 fn reject_symlink(path: &Path) -> Result<()> {
@@ -206,8 +227,10 @@ fn hook_env(shell: Shell, interactive: bool) -> Result<()> {
                 active = Some(root);
             }
         } else if interactive && !warned.lines().any(|line| Path::new(line) == root) {
+            // The wrapper-only setup has no `binloom` on PATH until a project is trusted.
             eprintln!(
-                "binloom: project not trusted; run binloom shell trust ({})",
+                "binloom: project not trusted; run '{}' shell trust '{}'",
+                env::current_exe()?.display(),
                 root.display()
             );
             warned.push_str(path_text(&root)?);
@@ -452,13 +475,11 @@ fn profile_path(home: &Path, shell: Shell, profile_dir: Option<&Path>) -> Result
     let home = home.canonicalize().context("cannot resolve HOME")?;
     let (mut path, relative) = match (shell, profile_dir) {
         (Shell::Bash, _) => (home, ".bashrc"),
-        (Shell::Zsh, Some(dir)) => (dir.to_path_buf(), ".zshrc"),
+        (Shell::Zsh, Some(dir)) => (resolve_base(dir)?, ".zshrc"),
         (Shell::Zsh, None) => (home, ".zshrc"),
-        (Shell::Fish, Some(dir)) => (dir.to_path_buf(), "fish/config.fish"),
+        (Shell::Fish, Some(dir)) => (resolve_base(dir)?, "fish/config.fish"),
         (Shell::Fish, None) => (home, ".config/fish/config.fish"),
     };
-    ensure!(path.is_absolute(), "profile directory must be absolute");
-    reject_symlink(&path)?;
     // Reject symlink redirects at every level, before reading or creating files.
     for component in Path::new(relative).components() {
         path.push(component);
@@ -606,6 +627,17 @@ mod tests {
         fs::remove_file(&zdot).unwrap();
         std::os::unix::fs::symlink(&zdot, &xdg).unwrap();
         assert!(profile_path(&home, Shell::Fish, Some(&xdg)).is_err());
+        // Ancestors resolve like HOME; missing tails are created below the real directory.
+        fs::create_dir_all(home.join("real/zsh")).unwrap();
+        std::os::unix::fs::symlink(home.join("real"), home.join("linked")).unwrap();
+        assert_eq!(
+            profile_path(&home, Shell::Zsh, Some(&home.join("linked/zsh"))).unwrap(),
+            home.join("real/zsh/.zshrc")
+        );
+        assert_eq!(
+            profile_path(&home, Shell::Fish, Some(&home.join("linked/missing/xdg"))).unwrap(),
+            home.join("real/missing/xdg/fish/config.fish")
+        );
     }
 
     #[test]

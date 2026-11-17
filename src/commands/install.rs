@@ -155,14 +155,19 @@ pub(super) fn install_from(root: &Path, client: &download::Client) -> Result<()>
     }
 
     if let Some(binloom) = &lockfile.binloom
-        && root
-            .join(TOOLS_DIR)
-            .join("binloom")
-            .join(&binloom.version)
-            .join("binloom")
-            .is_file()
+        && let Some(artifact) = binloom.artifacts.get(&platform_key)
     {
-        link_tool(root, "binloom", &binloom.version)?;
+        let directory = root.join(TOOLS_DIR).join("binloom").join(&binloom.version);
+        let cached = directory.join("binloom");
+        if cached_artifact_matches(
+            &cached,
+            &directory.join(".artifact-sha256"),
+            &artifact.sha256,
+        )? {
+            link_tool(root, "binloom", &binloom.version)?;
+        } else if cached.is_file() {
+            eprintln!("cached Binloom does not match binloom.lock; run ./binloomw install");
+        }
     }
 
     Ok(())

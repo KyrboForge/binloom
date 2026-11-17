@@ -76,6 +76,27 @@ fn install_does_not_link_a_missing_locked_binary() {
 }
 
 #[test]
+fn install_skips_linking_binloom_whose_stamp_does_not_match_the_lock() {
+    let home = tempfile::tempdir().unwrap();
+    project(home.path());
+    fs::write(
+        home.path().join(".tools/binloom/1.0.0/.artifact-sha256"),
+        "1".repeat(64),
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_binloom"))
+        .arg("install")
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", home.path().join(".config"))
+        .current_dir(home.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("binloomw install"));
+    assert!(!home.path().join(".tools/.bin/binloom").exists());
+}
+
+#[test]
 fn install_rejects_reserved_binloom_tool_without_overwriting_it() {
     for name in ["binloom", "Binloom"] {
         install_rejects_reserved_tool(name);

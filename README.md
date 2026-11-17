@@ -145,8 +145,8 @@ Enable automatic project-local commands in your shell? [y/N]
 Answering `y` trusts the current project and appends a marked block to `~/.bashrc`,
 `${ZDOTDIR:-~}/.zshrc`, or `${XDG_CONFIG_HOME:-~/.config}/fish/config.fish`,
 selected from `$SHELL`. Existing contents and permissions are preserved; an existing profile gets a sibling
-`.binloom.bak` backup before atomic replacement. Symlinked profile files or parent
-directories are rejected. The block runs the executable used during setup and does nothing if it is
+`.binloom.bak` backup before atomic replacement. `HOME`, `ZDOTDIR` and `XDG_CONFIG_HOME`
+are resolved like the shell does; symlinked profile files or directories below them are rejected. The block runs the executable used during setup and does nothing if it is
 missing; no global binary is installed.
 Keep that cached executable available, or regenerate the hook from another
 available Binloom.
