@@ -1,5 +1,5 @@
 use crate::common::warn;
-use crate::domain::platform::Platform;
+use crate::domain::platform::{Platform, contains_token};
 use crate::download;
 use crate::download::Client;
 use anyhow::{Context, bail};
@@ -40,15 +40,18 @@ impl Release {
             })
             .collect::<Vec<_>>();
 
-        let matches = self
-            .assets
+        // Candidates follow alias declaration order, so the first alias with a
+        // match wins instead of making `amd64` and `x64` ambiguous.
+        let matches = candidates
             .iter()
-            .filter(|asset| {
-                candidates
+            .map(|candidate| {
+                self.assets
                     .iter()
-                    .any(|candidate| asset.name.eq_ignore_ascii_case(candidate))
+                    .filter(|asset| asset.name.eq_ignore_ascii_case(candidate))
+                    .collect::<Vec<_>>()
             })
-            .collect::<Vec<_>>();
+            .find(|matches| !matches.is_empty())
+            .unwrap_or_default();
 
         match matches.as_slice() {
             [asset] => Ok(asset),
@@ -90,14 +93,8 @@ impl Release {
                 !is_metadata
                     && !is_package
                     && name.contains(&tool_name)
-                    && platform
-                        .os_aliases()
-                        .iter()
-                        .any(|alias| name.contains(alias))
-                    && platform
-                        .arch_aliases()
-                        .iter()
-                        .any(|alias| name.contains(alias))
+                    && platform.os_in(&name)
+                    && platform.arch_in(&name)
             })
             .collect();
         // Variants are dropped before the gzip shortcut and alias preferences,
@@ -133,26 +130,23 @@ impl Release {
         let matches = Self::prefer(
             matches,
             &format!("OS alias {}", platform.os_aliases()[0]),
-            |asset| {
-                asset
-                    .name
-                    .to_ascii_lowercase()
-                    .contains(platform.os_aliases()[0])
-            },
+            |asset| contains_token(&asset.name, platform.os_aliases()[0]),
             emitted_warnings,
         );
 
-        let matches = Self::prefer(
-            matches,
-            &format!("architecture alias {}", platform.arch_aliases()[0]),
-            |asset| {
-                asset
-                    .name
-                    .to_ascii_lowercase()
-                    .contains(platform.arch_aliases()[0])
-            },
-            emitted_warnings,
-        );
+        // Aliases are ranked in declaration order so `amd64` keeps winning over
+        // the later `x64`/`x86-64` spellings when a release ships several.
+        let matches = platform
+            .arch_aliases()
+            .iter()
+            .fold(matches, |matches, alias| {
+                Self::prefer(
+                    matches,
+                    &format!("architecture alias {alias}"),
+                    |asset| contains_token(&asset.name, alias),
+                    emitted_warnings,
+                )
+            });
 
         let matches = Self::prefer(
             matches,
@@ -398,6 +392,113 @@ mod tests {
                 .unwrap();
 
             assert_eq!(matched.name, expected_name);
+        }
+    }
+
+    #[test]
+    fn matches_gitleaks_x64_assets_for_every_platform() {
+        let release = Release {
+            tag: "v8.30.1".to_owned(),
+            published_at: None,
+            assets: vec![
+                asset("gitleaks_8.30.1_checksums.txt"),
+                asset("gitleaks_8.30.1_darwin_arm64.tar.gz"),
+                asset("gitleaks_8.30.1_darwin_x64.tar.gz"),
+                asset("gitleaks_8.30.1_linux_arm64.tar.gz"),
+                asset("gitleaks_8.30.1_linux_armv6.tar.gz"),
+                asset("gitleaks_8.30.1_linux_armv7.tar.gz"),
+                asset("gitleaks_8.30.1_linux_x32.tar.gz"),
+                asset("gitleaks_8.30.1_linux_x64.tar.gz"),
+                asset("gitleaks_8.30.1_windows_arm64.zip"),
+                asset("gitleaks_8.30.1_windows_x32.zip"),
+                asset("gitleaks_8.30.1_windows_x64.zip"),
+            ],
+        };
+
+        let expected = [
+            (
+                Platform::MacosAarch64,
+                "gitleaks_8.30.1_darwin_arm64.tar.gz",
+            ),
+            (Platform::MacosX86_64, "gitleaks_8.30.1_darwin_x64.tar.gz"),
+            (Platform::LinuxAarch64, "gitleaks_8.30.1_linux_arm64.tar.gz"),
+            (Platform::LinuxX86_64, "gitleaks_8.30.1_linux_x64.tar.gz"),
+        ];
+
+        for (platform, expected_name) in expected {
+            let auto = release
+                .find_asset("gitleaks", platform, &mut BTreeSet::new())
+                .unwrap();
+            let pattern = release
+                .find_asset_by_pattern("gitleaks_{version}_{os}_{arch}.tar.gz", "8.30.1", platform)
+                .unwrap();
+
+            assert_eq!(auto.name, expected_name);
+            assert_eq!(pattern.name, expected_name);
+        }
+    }
+
+    #[test]
+    fn expands_every_architecture_alias_in_patterns() {
+        for alias in ["x64", "amd64", "x86-64", "x86_64"] {
+            let release = Release {
+                tag: "v1.0.0".to_owned(),
+                published_at: None,
+                assets: vec![asset(&format!("tool-linux-{alias}"))],
+            };
+
+            assert!(
+                release
+                    .find_asset_by_pattern("tool-{os}-{arch}", "1.0.0", Platform::LinuxX86_64)
+                    .is_ok(),
+                "{alias}"
+            );
+            assert!(
+                release
+                    .find_asset_by_pattern("tool-{os}-{arch}", "1.0.0", Platform::LinuxAarch64)
+                    .is_err(),
+                "{alias}"
+            );
+        }
+    }
+
+    #[test]
+    fn ranks_architecture_aliases_in_declaration_order() {
+        let release = Release {
+            tag: "v1.0.0".to_owned(),
+            published_at: None,
+            assets: vec![
+                asset("tool-linux-x64"),
+                asset("tool-linux-amd64"),
+                asset("tool-linux-x86-64"),
+            ],
+        };
+
+        let by_pattern = release
+            .find_asset_by_pattern("tool-{os}-{arch}", "1.0.0", Platform::LinuxX86_64)
+            .unwrap();
+        let automatic = release
+            .find_asset("tool", Platform::LinuxX86_64, &mut BTreeSet::new())
+            .unwrap();
+
+        assert_eq!(by_pattern.name, "tool-linux-amd64");
+        assert_eq!(automatic.name, "tool-linux-amd64");
+    }
+
+    #[test]
+    fn does_not_match_aliases_inside_other_tokens() {
+        let release = Release {
+            tag: "v1.0.0".to_owned(),
+            published_at: None,
+            assets: vec![asset("tool-linux-x64ish"), asset("tool-linux-armv6")],
+        };
+
+        for platform in [Platform::LinuxX86_64, Platform::LinuxAarch64] {
+            assert!(
+                release
+                    .find_asset("tool", platform, &mut BTreeSet::new())
+                    .is_err()
+            );
         }
     }
 

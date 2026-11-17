@@ -31,8 +31,22 @@ impl Platform {
     pub(crate) const fn arch_aliases(self) -> &'static [&'static str] {
         match self {
             Self::MacosAarch64 | Self::LinuxAarch64 => &["aarch64", "arm64"],
-            Self::MacosX86_64 | Self::LinuxX86_64 => &["x86_64", "amd64"],
+            Self::MacosX86_64 | Self::LinuxX86_64 => &["x86_64", "amd64", "x64", "x86-64"],
         }
+    }
+
+    /// True when `name` contains one of this platform's OS aliases as a token.
+    pub(crate) fn os_in(self, name: &str) -> bool {
+        self.os_aliases()
+            .iter()
+            .any(|alias| contains_token(name, alias))
+    }
+
+    /// True when `name` contains one of this platform's architecture aliases as a token.
+    pub(crate) fn arch_in(self, name: &str) -> bool {
+        self.arch_aliases()
+            .iter()
+            .any(|alias| contains_token(name, alias))
     }
 
     pub(crate) const fn target(self) -> &'static str {
@@ -42,6 +56,24 @@ impl Platform {
             Self::LinuxX86_64 => "x86_64-unknown-linux-musl",
         }
     }
+}
+
+/// Case-insensitive token match: `alias` must not be glued to other
+/// alphanumerics, so `x64` never matches inside `x64ish` and `arm64` never
+/// matches `aarch64`-only names by accident.
+pub(crate) fn contains_token(name: &str, alias: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    let alias = alias.to_ascii_lowercase();
+    let bytes = name.as_bytes();
+
+    name.match_indices(alias.as_str()).any(|(start, _)| {
+        let end = start + alias.len();
+        let before = start.checked_sub(1).map(|index| bytes[index]);
+        let after = bytes.get(end).copied();
+
+        !before.is_some_and(|byte| byte.is_ascii_alphanumeric())
+            && !after.is_some_and(|byte| byte.is_ascii_alphanumeric())
+    })
 }
 
 impl TryFrom<(&str, &str)> for Platform {
@@ -93,6 +125,31 @@ mod tests {
         let error = Platform::try_from(("windows", "x86_64")).unwrap_err();
 
         assert_eq!(error.to_string(), "unsupported platform: windows-x86_64");
+    }
+
+    #[test]
+    fn matches_architecture_alias_matrix_as_tokens() {
+        for alias in ["x64", "amd64", "x86-64", "x86_64", "X64", "AMD64"] {
+            let name = format!("tool_1.0.0_linux_{alias}.tar.gz");
+            assert!(Platform::LinuxX86_64.arch_in(&name), "{name}");
+            assert!(!Platform::LinuxAarch64.arch_in(&name), "{name}");
+        }
+        for alias in ["arm64", "aarch64", "ARM64"] {
+            let name = format!("tool_1.0.0_darwin_{alias}.tar.gz");
+            assert!(Platform::MacosAarch64.arch_in(&name), "{name}");
+            assert!(!Platform::MacosX86_64.arch_in(&name), "{name}");
+        }
+    }
+
+    #[test]
+    fn rejects_aliases_glued_to_other_tokens() {
+        assert!(!contains_token("tool_linux_x64ish", "x64"));
+        assert!(!contains_token("tool_linux_ax64", "x64"));
+        assert!(!contains_token("tool_linux_x32", "x64"));
+        assert!(!contains_token("tool_linux_armv6", "arm64"));
+        assert!(!Platform::LinuxX86_64.os_in("tool_linuxish_x64"));
+        assert!(Platform::MacosAarch64.os_in("tool.darwin.arm64.tar.gz"));
+        assert!(contains_token("tool-x86-64", "x86-64"));
     }
 
     #[test]
