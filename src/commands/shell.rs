@@ -425,7 +425,6 @@ pub(super) fn maybe_prompt(root: &Path, no_prompt: bool) -> Result<()> {
         || env::var("BINLOOM_NO_PROMPT").as_deref() == Ok("1")
         || !io::stdin().is_terminal()
         || !io::stderr().is_terminal()
-        || env::var("BINLOOM_SHELL_HOOK").as_deref() == Ok("1")
     {
         return Ok(());
     }
@@ -450,18 +449,21 @@ pub(super) fn maybe_prompt(root: &Path, no_prompt: bool) -> Result<()> {
     }
     .filter(|value| !value.is_empty())
     .map(PathBuf::from);
-    prompt_setup(
-        &mut io::stdin().lock(),
-        &mut io::stderr().lock(),
-        &ActivationSetup {
-            home: &home,
-            config: &config,
-            shell,
-            root,
-            executable: &executable,
-            profile_dir: profile_dir.as_deref(),
-        },
-    )
+    let setup = ActivationSetup {
+        home: &home,
+        config: &config,
+        shell,
+        root,
+        executable: &executable,
+        profile_dir: profile_dir.as_deref(),
+    };
+    // An active hook (possibly `shell init` run by hand) never prompts or edits
+    // profiles, but it still repairs a setup the user already consented to.
+    if env::var("BINLOOM_SHELL_HOOK").as_deref() == Ok("1") {
+        restore_consented(&mut io::stderr().lock(), &setup).map(drop)
+    } else {
+        prompt_setup(&mut io::stdin().lock(), &mut io::stderr().lock(), &setup)
+    }
     .context(
         "shell activation setup failed; installed tools are still available through binloom exec",
     )
@@ -605,31 +607,37 @@ fn append_rc(path: &Path, existing: &str, block: &str) -> Result<()> {
     Ok(())
 }
 
+/// Restores the pinned executable after a saved "yes"; returns whether the
+/// user has already answered the prompt.
+fn restore_consented(output: &mut impl Write, setup: &ActivationSetup<'_>) -> Result<bool> {
+    reject_symlink(setup.config)?;
+    let answer = read_optional(&setup.config.join("activation-prompt"))?;
+    if answer == "yes\n" {
+        let directory = setup.config.join("bin");
+        reject_symlink(&directory)?;
+        let stable = directory.join("binloom");
+        reject_symlink(&stable)?;
+        if !stable.try_exists()? {
+            install_stable_executable(setup.config, setup.executable)?;
+            writeln!(
+                output,
+                "Binloom shell activation executable restored at {}.",
+                stable.display()
+            )?;
+        }
+    }
+    Ok(!answer.is_empty())
+}
+
 fn prompt_setup(
     input: &mut impl io::BufRead,
     output: &mut impl Write,
     setup: &ActivationSetup<'_>,
 ) -> Result<()> {
-    reject_symlink(setup.config)?;
-    let marker = setup.config.join("activation-prompt");
-    let answer = read_optional(&marker)?;
-    if !answer.is_empty() {
-        if answer == "yes\n" {
-            let directory = setup.config.join("bin");
-            reject_symlink(&directory)?;
-            let stable = directory.join("binloom");
-            reject_symlink(&stable)?;
-            if !stable.try_exists()? {
-                install_stable_executable(setup.config, setup.executable)?;
-                writeln!(
-                    output,
-                    "Binloom shell activation executable restored at {}.",
-                    stable.display()
-                )?;
-            }
-        }
+    if restore_consented(output, setup)? {
         return Ok(());
     }
+    let marker = setup.config.join("activation-prompt");
     if read_profiles(setup)?
         .iter()
         .all(|(_, existing)| existing.contains(BLOCK_BEGIN))
@@ -984,6 +992,26 @@ mod tests {
         prompt_setup(&mut Cursor::new(b"y\n"), &mut output, &fixture.setup()).unwrap();
         assert!(output.is_empty());
         assert!(!stable.exists());
+    }
+
+    #[test]
+    fn active_hook_restores_consented_copy_without_prompting() {
+        let fixture = SetupFixture::new();
+        let mut output = Vec::new();
+        assert!(!restore_consented(&mut output, &fixture.setup()).unwrap());
+        assert!(output.is_empty());
+        assert!(!fixture.config.exists());
+        assert!(!fixture.home.path().join(".bashrc").exists());
+
+        fixture.consent();
+        let stable = fixture.config.join("bin/binloom");
+        fs::remove_file(&stable).unwrap();
+        assert!(restore_consented(&mut output, &fixture.setup()).unwrap());
+        assert!(String::from_utf8(output).unwrap().contains("restored"));
+        assert_eq!(
+            fs::read(&stable).unwrap(),
+            fs::read(&fixture.executable).unwrap()
+        );
     }
 
     #[test]
