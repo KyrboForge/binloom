@@ -917,12 +917,13 @@ mod tests {
     }
 
     #[test]
-    fn never_installs_unsupported_tar_bz2_next_to_tar_gz() {
+    fn never_installs_unsupported_tar_compressions_next_to_tar_gz() {
         let release = Release {
             tag: "v1.0.0".to_owned(),
             published_at: None,
             assets: vec![
                 asset("tool-x86_64-unknown-linux-musl.tar.bz2"),
+                asset("tool-x86_64-unknown-linux-musl.tar.lz4"),
                 asset("tool-x86_64-unknown-linux-musl.tar.gz"),
             ],
         };

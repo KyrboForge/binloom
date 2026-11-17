@@ -211,11 +211,18 @@ impl TryFrom<&str> for ArtifactFormat {
                 .is_some_and(|ending| ending.eq_ignore_ascii_case(suffix))
         };
 
+        // Any other `.tar.<compression>` is unsupported, so new compressions
+        // never parse as raw executables.
         if [
-            ".zip", ".tar", ".xz", ".txz", ".zst", ".zstd", ".bz2", ".tbz2", ".7z", ".rar",
+            ".zip", ".tar", ".xz", ".txz", ".zst", ".zstd", ".bz2", ".tbz2", ".7z", ".rar", ".lz4",
+            ".lz", ".lzma", ".br", ".z",
         ]
         .iter()
         .any(|suffix| ends_with(suffix))
+            || asset
+                .to_ascii_lowercase()
+                .rsplit_once(".tar.")
+                .is_some_and(|(_, compression)| compression != "gz")
         {
             bail!("unsupported asset format: {asset}");
         }
@@ -477,6 +484,18 @@ artifacts = {}
             ArtifactFormat::TarGz
         ));
         assert!(ArtifactFormat::try_from("tool.ZIP").is_err());
+        for unsupported in [
+            "tool.tar.lz4",
+            "tool.tar.LZMA",
+            "tool.tar.br",
+            "tool.lz4",
+            "tool.Z",
+        ] {
+            assert!(
+                ArtifactFormat::try_from(unsupported).is_err(),
+                "{unsupported}"
+            );
+        }
     }
 
     #[test]
