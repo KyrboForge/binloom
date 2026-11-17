@@ -5,7 +5,7 @@ use clap::Subcommand;
 use std::{
     env, fs,
     io::{self, IsTerminal, Write},
-    os::unix::fs::{DirBuilderExt, PermissionsExt},
+    os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
 };
 
@@ -154,6 +154,16 @@ fn write_private(path: &Path, content: &str) -> Result<()> {
 }
 
 fn set_trust(config: &Path, root: &Path, trust: bool) -> Result<()> {
+    prepare_config(config)?;
+    let lock_path = config.join("trusted.lock");
+    reject_symlink(&lock_path)?;
+    let lock = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&lock_path)?;
+    lock.lock()?;
     let mut roots = read_trusted(config)?;
     roots.retain(|entry| entry != root);
     if trust {
@@ -164,7 +174,6 @@ fn set_trust(config: &Path, root: &Path, trust: bool) -> Result<()> {
         content.push_str(path_text(&root)?);
         content.push('\n');
     }
-    prepare_config(config)?;
     write_private(&config.join("trusted"), &content)
 }
 
@@ -306,19 +315,21 @@ _binloom_deactivate() {
     unset BINLOOM_ACTIVE_ROOT BINLOOM_PATH_ADDED
 }
 _binloom_hook() {
+    local _binloom_status=$?
     if [ "${_BINLOOM_LAST_PWD+x}" = x ] && [ "$_BINLOOM_LAST_PWD" = "$PWD" ]; then
-        return 0
+        return "$_binloom_status"
     fi
     _BINLOOM_LAST_PWD=$PWD
     if [ ! -x "$_BINLOOM_EXE" ]; then
         _binloom_deactivate
-        return 0
+        return "$_binloom_status"
     fi
     case $- in
-        *i*) _binloom_env=$("$_BINLOOM_EXE" shell hook-env --shell @SHELL@ --interactive) || { _binloom_deactivate; return 0; } ;;
-        *) _binloom_env=$("$_BINLOOM_EXE" shell hook-env --shell @SHELL@) || { _binloom_deactivate; return 0; } ;;
+        *i*) _binloom_env=$("$_BINLOOM_EXE" shell hook-env --shell @SHELL@ --interactive) || { _binloom_deactivate; return "$_binloom_status"; } ;;
+        *) _binloom_env=$("$_BINLOOM_EXE" shell hook-env --shell @SHELL@) || { _binloom_deactivate; return "$_binloom_status"; } ;;
     esac
     eval "$_binloom_env"
+    return "$_binloom_status"
 }
 "#;
 
@@ -428,12 +439,20 @@ const BLOCK_END: &str = "# <<< binloom shell activation <<<";
 
 fn profile_path(home: &Path, shell: Shell) -> Result<PathBuf> {
     ensure!(home.is_absolute(), "HOME must be absolute");
-    let mut path = home.canonicalize().context("cannot resolve HOME")?;
-    let relative = match shell {
-        Shell::Bash => ".bashrc",
-        Shell::Zsh => ".zshrc",
-        Shell::Fish => ".config/fish/config.fish",
+    let home = home.canonicalize().context("cannot resolve HOME")?;
+    let (mut path, relative) = match shell {
+        Shell::Bash => (home, ".bashrc"),
+        Shell::Zsh => match env::var_os("ZDOTDIR").filter(|value| !value.is_empty()) {
+            Some(dir) => (PathBuf::from(dir), ".zshrc"),
+            None => (home, ".zshrc"),
+        },
+        Shell::Fish => match env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
+            Some(dir) => (PathBuf::from(dir), "fish/config.fish"),
+            None => (home, ".config/fish/config.fish"),
+        },
     };
+    ensure!(path.is_absolute(), "profile directory must be absolute");
+    reject_symlink(&path)?;
     // Reject symlink redirects at every level, before reading or creating files.
     for component in Path::new(relative).components() {
         path.push(component);
@@ -443,15 +462,15 @@ fn profile_path(home: &Path, shell: Shell) -> Result<PathBuf> {
 }
 
 fn rc_block(shell: Shell, executable: &Path) -> Result<String> {
-    let fallback = shell.quote(path_text(executable)?);
+    let pinned = shell.quote(path_text(executable)?);
     let name = shell.name();
     let body = match shell {
         Shell::Bash | Shell::Zsh => format!(
-            "if [ -x {fallback} ]; then\n    eval \"$({fallback} shell init --shell {name})\"\nelif command -v binloom >/dev/null 2>&1; then\n    eval \"$(binloom shell init --shell {name})\"\nfi"
+            "if [ -x {pinned} ]; then\n    eval \"$({pinned} shell init --shell {name})\"\nfi"
         ),
-        Shell::Fish => format!(
-            "if test -x {fallback}\n    {fallback} shell init --shell fish | source\nelse if command -q binloom\n    binloom shell init --shell fish | source\nend"
-        ),
+        Shell::Fish => {
+            format!("if test -x {pinned}\n    {pinned} shell init --shell fish | source\nend")
+        }
     };
     Ok(format!("{BLOCK_BEGIN}\n{body}\n{BLOCK_END}\n"))
 }
@@ -556,6 +575,51 @@ fn prompt_setup(
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn profile_environment_directories() {
+        if let Some(home) = env::var_os("BINLOOM_TEST_PROFILE_HOME") {
+            let home = PathBuf::from(home);
+            let zdot = home.join("zsh");
+            let xdg = home.join("xdg");
+            assert_eq!(
+                profile_path(&home, Shell::Zsh).unwrap(),
+                zdot.join(".zshrc")
+            );
+            assert_eq!(
+                profile_path(&home, Shell::Fish).unwrap(),
+                xdg.join("fish/config.fish")
+            );
+            std::os::unix::fs::symlink(&xdg, &zdot).unwrap();
+            assert!(profile_path(&home, Shell::Zsh).is_err());
+            fs::remove_file(&zdot).unwrap();
+            std::os::unix::fs::symlink(&zdot, &xdg).unwrap();
+            assert!(profile_path(&home, Shell::Fish).is_err());
+            return;
+        }
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path().canonicalize().unwrap();
+        let status = std::process::Command::new(env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "commands::shell::tests::profile_environment_directories",
+            ])
+            .env("BINLOOM_TEST_PROFILE_HOME", &home)
+            .env("ZDOTDIR", home.join("zsh"))
+            .env("XDG_CONFIG_HOME", home.join("xdg"))
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[test]
+    fn rc_block_never_uses_path_fallback() {
+        for shell in [Shell::Bash, Shell::Zsh, Shell::Fish] {
+            let block = rc_block(shell, Path::new("/missing/binloom")).unwrap();
+            assert!(!block.contains("command -v"));
+            assert!(!block.contains("command -q"));
+        }
+    }
 
     #[test]
     fn consent_keeps_profile_edits_made_while_waiting_for_the_answer() {

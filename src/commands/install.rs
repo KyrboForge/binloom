@@ -58,6 +58,24 @@ pub(super) fn install_from(root: &Path, client: &download::Client) -> Result<()>
         "no tools in binloom.lock"
     );
 
+    if let Some(binloom) = &lockfile.binloom {
+        let cached = root
+            .join(TOOLS_DIR)
+            .join("binloom")
+            .join(&binloom.version)
+            .join("binloom");
+        let link = root.join(TOOLS_DIR).join(".bin/binloom");
+        if !cached.is_file()
+            && let (Ok(executable), Ok(link_target)) = (
+                std::env::current_exe().and_then(|path| path.canonicalize()),
+                link.canonicalize(),
+            )
+            && executable == link_target
+        {
+            bail!("locked Binloom version is not cached; run ./binloomw install");
+        }
+    }
+
     let platform = Platform::current()?;
     let platform_key = platform.to_string();
 

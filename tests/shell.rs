@@ -324,3 +324,53 @@ fn fallback_config_directory_cannot_redirect_writes_outside_home() {
     assert!(!output.status.success());
     assert!(!outside.path().join("binloom/trusted").exists());
 }
+
+#[test]
+fn scalar_prompt_command_preserves_previous_status() {
+    let fixture = Fixture::new();
+    success(fixture.bash(
+        r#"
+        PROMPT_COMMAND='last_status=$?'
+        eval "$("$BIN" shell init --shell bash)"
+        false
+        eval "$PROMPT_COMMAND"
+        test "$last_status" = 1
+    "#,
+    ));
+}
+
+#[test]
+fn concurrent_trust_updates_are_preserved() {
+    let fixture = Fixture::new();
+    let mut children = Vec::new();
+    for i in 0..20 {
+        let root = fixture.home.path().join(format!("project-{i}"));
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("binloom.toml"), "").unwrap();
+        children.push(
+            fixture
+                .command(env!("CARGO_BIN_EXE_binloom"))
+                .args(["shell", "trust"])
+                .arg(root)
+                .spawn()
+                .unwrap(),
+        );
+    }
+    for mut child in children {
+        assert!(child.wait().unwrap().success());
+    }
+    let contents = fs::read_to_string(fixture.home.path().join(".config/binloom/trusted")).unwrap();
+    assert_eq!(contents.lines().count(), 20);
+}
+
+#[test]
+fn trust_rejects_symlinked_lock_file() {
+    let fixture = Fixture::new();
+    let config = fixture.home.path().join(".config/binloom");
+    fs::create_dir_all(&config).unwrap();
+    let outside = fixture.home.path().join("outside-lock");
+    fs::write(&outside, "unchanged").unwrap();
+    symlink(&outside, config.join("trusted.lock")).unwrap();
+    assert!(!fixture.run(&["shell", "trust"]).status.success());
+    assert_eq!(fs::read_to_string(outside).unwrap(), "unchanged");
+}

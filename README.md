@@ -143,12 +143,11 @@ Enable automatic project-local commands in your shell? [y/N]
 ```
 
 Answering `y` trusts the current project and appends a marked block to `~/.bashrc`,
-`~/.zshrc`, or `~/.config/fish/config.fish`, selected from `$SHELL`. Existing
-contents and permissions are preserved; an existing profile gets a sibling
+`${ZDOTDIR:-~}/.zshrc`, or `${XDG_CONFIG_HOME:-~/.config}/fish/config.fish`,
+selected from `$SHELL`. Existing contents and permissions are preserved; an existing profile gets a sibling
 `.binloom.bak` backup before atomic replacement. Symlinked profile files or parent
-directories are rejected. The block runs the executable used during setup and
-falls back to Binloom on PATH only when that file is gone, so a project's
-`.tools/.bin` can never choose the hook's binary; no global binary is installed.
+directories are rejected. The block runs the executable used during setup and does nothing if it is
+missing; no global binary is installed.
 Keep that cached executable available, or regenerate the hook from another
 available Binloom.
 

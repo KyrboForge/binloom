@@ -127,3 +127,23 @@ fn install_links_binloom_in_a_project_without_other_tools() {
         std::path::Path::new("../binloom/1.0.0/binloom")
     );
 }
+
+#[test]
+fn stale_activated_binloom_requires_wrapper() {
+    let home = tempfile::tempdir().unwrap();
+    project(home.path());
+    fs::remove_file(home.path().join(".tools/binloom/1.0.0/binloom")).unwrap();
+    let old = home.path().join(".tools/binloom/old/binloom");
+    fs::create_dir_all(old.parent().unwrap()).unwrap();
+    fs::copy(env!("CARGO_BIN_EXE_binloom"), &old).unwrap();
+    fs::create_dir_all(home.path().join(".tools/.bin")).unwrap();
+    let link = home.path().join(".tools/.bin/binloom");
+    std::os::unix::fs::symlink("../binloom/old/binloom", &link).unwrap();
+    let output = Command::new(&link)
+        .arg("install")
+        .current_dir(home.path())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("./binloomw install"));
+}
