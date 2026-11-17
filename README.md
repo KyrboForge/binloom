@@ -146,9 +146,11 @@ Answering `y` trusts the current project and appends a marked block to `~/.bashr
 `~/.zshrc`, or `~/.config/fish/config.fish`, selected from `$SHELL`. Existing
 contents and permissions are preserved; an existing profile gets a sibling
 `.binloom.bak` backup before atomic replacement. Symlinked profile files or parent
-directories are rejected. The block uses Binloom on PATH, with the executable
-used during setup as a fallback; no global binary is installed. Keep that cached
-executable available, or regenerate the hook from another available Binloom.
+directories are rejected. The block runs the executable used during setup and
+falls back to Binloom on PATH only when that file is gone, so a project's
+`.tools/.bin` can never choose the hook's binary; no global binary is installed.
+Keep that cached executable available, or regenerate the hook from another
+available Binloom.
 
 Open a new shell or source the updated profile to enable it. A child process
 cannot change the PATH of the shell that ran `install`. Answering anything other

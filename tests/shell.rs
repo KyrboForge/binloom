@@ -249,6 +249,16 @@ fn trust_does_not_follow_config_symlinks() {
     symlink(&outside, config.join("binloom")).unwrap();
     assert!(!fixture.run(&["shell", "trust"]).status.success());
     assert!(!Path::new(&outside).join("trusted").exists());
+
+    // The XDG base itself must not redirect the store either.
+    let linked = fixture.home.path().join("linked-config");
+    symlink(&outside, &linked).unwrap();
+    let mut trust = fixture.command(env!("CARGO_BIN_EXE_binloom"));
+    trust
+        .args(["shell", "trust"])
+        .env("XDG_CONFIG_HOME", &linked);
+    assert!(!trust.output().unwrap().status.success());
+    assert!(!outside.join("binloom").exists());
 }
 
 #[test]

@@ -83,7 +83,11 @@ fn root_at(path: Option<&Path>) -> Result<PathBuf> {
 
 fn config_dir() -> Result<PathBuf> {
     let base = match env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
-        Some(value) => PathBuf::from(value),
+        Some(value) => {
+            let base = PathBuf::from(value);
+            reject_symlink(&base)?;
+            base
+        }
         None => {
             let home = PathBuf::from(env::var_os("HOME").context("HOME is not set")?);
             ensure!(home.is_absolute(), "HOME must be absolute");
@@ -443,10 +447,10 @@ fn rc_block(shell: Shell, executable: &Path) -> Result<String> {
     let name = shell.name();
     let body = match shell {
         Shell::Bash | Shell::Zsh => format!(
-            "if command -v binloom >/dev/null 2>&1; then\n    eval \"$(binloom shell init --shell {name})\"\nelif [ -x {fallback} ]; then\n    eval \"$({fallback} shell init --shell {name})\"\nfi"
+            "if [ -x {fallback} ]; then\n    eval \"$({fallback} shell init --shell {name})\"\nelif command -v binloom >/dev/null 2>&1; then\n    eval \"$(binloom shell init --shell {name})\"\nfi"
         ),
         Shell::Fish => format!(
-            "if command -q binloom\n    binloom shell init --shell fish | source\nelse if test -x {fallback}\n    {fallback} shell init --shell fish | source\nend"
+            "if test -x {fallback}\n    {fallback} shell init --shell fish | source\nelse if command -q binloom\n    binloom shell init --shell fish | source\nend"
         ),
     };
     Ok(format!("{BLOCK_BEGIN}\n{body}\n{BLOCK_END}\n"))
