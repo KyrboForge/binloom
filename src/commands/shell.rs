@@ -393,6 +393,8 @@ struct ActivationSetup<'a> {
     shell: Shell,
     root: &'a Path,
     executable: &'a Path,
+    /// `$ZDOTDIR` for zsh or `$XDG_CONFIG_HOME` for fish, when set.
+    profile_dir: Option<&'a Path>,
 }
 
 pub(super) fn maybe_prompt(root: &Path, no_prompt: bool) -> Result<()> {
@@ -418,6 +420,13 @@ pub(super) fn maybe_prompt(root: &Path, no_prompt: bool) -> Result<()> {
     let home = PathBuf::from(env::var_os("HOME").context("HOME is not set")?);
     let config = config_dir()?;
     let executable = env::current_exe()?;
+    let profile_dir = match shell {
+        Shell::Bash => None,
+        Shell::Zsh => env::var_os("ZDOTDIR"),
+        Shell::Fish => env::var_os("XDG_CONFIG_HOME"),
+    }
+    .filter(|value| !value.is_empty())
+    .map(PathBuf::from);
     prompt_setup(
         &mut io::stdin().lock(),
         &mut io::stderr().lock(),
@@ -427,6 +436,7 @@ pub(super) fn maybe_prompt(root: &Path, no_prompt: bool) -> Result<()> {
             shell,
             root,
             executable: &executable,
+            profile_dir: profile_dir.as_deref(),
         },
     )
     .context(
@@ -437,19 +447,15 @@ pub(super) fn maybe_prompt(root: &Path, no_prompt: bool) -> Result<()> {
 const BLOCK_BEGIN: &str = "# >>> binloom shell activation >>>";
 const BLOCK_END: &str = "# <<< binloom shell activation <<<";
 
-fn profile_path(home: &Path, shell: Shell) -> Result<PathBuf> {
+fn profile_path(home: &Path, shell: Shell, profile_dir: Option<&Path>) -> Result<PathBuf> {
     ensure!(home.is_absolute(), "HOME must be absolute");
     let home = home.canonicalize().context("cannot resolve HOME")?;
-    let (mut path, relative) = match shell {
-        Shell::Bash => (home, ".bashrc"),
-        Shell::Zsh => match env::var_os("ZDOTDIR").filter(|value| !value.is_empty()) {
-            Some(dir) => (PathBuf::from(dir), ".zshrc"),
-            None => (home, ".zshrc"),
-        },
-        Shell::Fish => match env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
-            Some(dir) => (PathBuf::from(dir), "fish/config.fish"),
-            None => (home, ".config/fish/config.fish"),
-        },
+    let (mut path, relative) = match (shell, profile_dir) {
+        (Shell::Bash, _) => (home, ".bashrc"),
+        (Shell::Zsh, Some(dir)) => (dir.to_path_buf(), ".zshrc"),
+        (Shell::Zsh, None) => (home, ".zshrc"),
+        (Shell::Fish, Some(dir)) => (dir.to_path_buf(), "fish/config.fish"),
+        (Shell::Fish, None) => (home, ".config/fish/config.fish"),
     };
     ensure!(path.is_absolute(), "profile directory must be absolute");
     reject_symlink(&path)?;
@@ -520,7 +526,7 @@ fn prompt_setup(
     if !read_optional(&marker)?.is_empty() {
         return Ok(());
     }
-    let rc = profile_path(setup.home, setup.shell)?;
+    let rc = profile_path(setup.home, setup.shell, setup.profile_dir)?;
     let existing = read_optional(&rc)?;
     if existing.contains(BLOCK_BEGIN) {
         ensure!(
@@ -544,7 +550,7 @@ fn prompt_setup(
     }
     // Consent can take arbitrarily long: recheck redirects and preserve edits
     // made by the user (or another setup process) while the prompt was open.
-    let rc = profile_path(setup.home, setup.shell)?;
+    let rc = profile_path(setup.home, setup.shell, setup.profile_dir)?;
     let existing = read_optional(&rc)?;
     let configured = existing.contains(BLOCK_BEGIN);
     ensure!(
@@ -578,38 +584,28 @@ mod tests {
 
     #[test]
     fn profile_environment_directories() {
-        if let Some(home) = env::var_os("BINLOOM_TEST_PROFILE_HOME") {
-            let home = PathBuf::from(home);
-            let zdot = home.join("zsh");
-            let xdg = home.join("xdg");
-            assert_eq!(
-                profile_path(&home, Shell::Zsh).unwrap(),
-                zdot.join(".zshrc")
-            );
-            assert_eq!(
-                profile_path(&home, Shell::Fish).unwrap(),
-                xdg.join("fish/config.fish")
-            );
-            std::os::unix::fs::symlink(&xdg, &zdot).unwrap();
-            assert!(profile_path(&home, Shell::Zsh).is_err());
-            fs::remove_file(&zdot).unwrap();
-            std::os::unix::fs::symlink(&zdot, &xdg).unwrap();
-            assert!(profile_path(&home, Shell::Fish).is_err());
-            return;
-        }
         let home = tempfile::tempdir().unwrap();
         let home = home.path().canonicalize().unwrap();
-        let status = std::process::Command::new(env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "commands::shell::tests::profile_environment_directories",
-            ])
-            .env("BINLOOM_TEST_PROFILE_HOME", &home)
-            .env("ZDOTDIR", home.join("zsh"))
-            .env("XDG_CONFIG_HOME", home.join("xdg"))
-            .status()
-            .unwrap();
-        assert!(status.success());
+        let zdot = home.join("zsh");
+        let xdg = home.join("xdg");
+        assert_eq!(
+            profile_path(&home, Shell::Zsh, Some(&zdot)).unwrap(),
+            zdot.join(".zshrc")
+        );
+        assert_eq!(
+            profile_path(&home, Shell::Fish, Some(&xdg)).unwrap(),
+            xdg.join("fish/config.fish")
+        );
+        assert_eq!(
+            profile_path(&home, Shell::Fish, None).unwrap(),
+            home.join(".config/fish/config.fish")
+        );
+        assert!(profile_path(&home, Shell::Zsh, Some(Path::new("relative"))).is_err());
+        std::os::unix::fs::symlink(&xdg, &zdot).unwrap();
+        assert!(profile_path(&home, Shell::Zsh, Some(&zdot)).is_err());
+        fs::remove_file(&zdot).unwrap();
+        std::os::unix::fs::symlink(&zdot, &xdg).unwrap();
+        assert!(profile_path(&home, Shell::Fish, Some(&xdg)).is_err());
     }
 
     #[test]
@@ -652,6 +648,7 @@ mod tests {
             shell: Shell::Bash,
             root: home.path(),
             executable: Path::new("/cached/binloom"),
+            profile_dir: None,
         };
         let mut input = EditingReader {
             rc: rc.clone(),
@@ -687,6 +684,7 @@ mod tests {
                 shell,
                 root: &root,
                 executable: Path::new("/cached/binloom"),
+                profile_dir: None,
             };
             let mut output = Vec::new();
             prompt_setup(&mut Cursor::new(b"y\n"), &mut output, &setup).unwrap();
@@ -730,6 +728,7 @@ mod tests {
                 shell: Shell::Bash,
                 root: home.path(),
                 executable: Path::new("/cached/binloom"),
+                profile_dir: None,
             };
             let mut output = Vec::new();
             prompt_setup(&mut Cursor::new(answer), &mut output, &setup).unwrap();
@@ -766,6 +765,7 @@ mod tests {
                 shell,
                 root: home.path(),
                 executable: Path::new("/cached/binloom"),
+                profile_dir: None,
             };
             assert!(prompt_setup(&mut Cursor::new(b"y\n"), &mut Vec::new(), &setup).is_err());
             assert!(!config.join("activation-prompt").exists());
