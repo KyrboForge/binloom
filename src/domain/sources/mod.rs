@@ -33,17 +33,18 @@ pub(crate) fn bare_version<'a>(name: &str, version: &'a str) -> &'a str {
         .unwrap_or(version)
 }
 
-fn release_tags(name: &str, version: &str) -> Vec<String> {
-    if version.starts_with('v') {
-        vec![version.to_owned(), format!("{name}-{version}")]
-    } else {
-        vec![
-            format!("v{version}"),
-            version.to_owned(),
-            format!("{name}-{version}"),
-            format!("{name}-v{version}"),
-        ]
-    }
+/// Only tags that strip back to `version` are tried, so the locked version
+/// always equals the manifest version (`nightly` never resolves `vnightly`).
+pub(crate) fn release_tags(name: &str, version: &str) -> Vec<String> {
+    [
+        format!("v{version}"),
+        version.to_owned(),
+        format!("{name}-{version}"),
+        format!("{name}-v{version}"),
+    ]
+    .into_iter()
+    .filter(|tag| bare_version(name, tag) == version)
+    .collect()
 }
 
 #[derive(Debug, Deserialize)]
@@ -135,8 +136,16 @@ mod tests {
     }
 
     #[test]
-    fn builds_release_tags_for_v_prefixed_version() {
-        assert_eq!(release_tags("tool", "v1.2.3"), ["v1.2.3", "tool-v1.2.3"]);
+    fn builds_only_unprefixed_release_tags_for_nonnumeric_versions() {
+        assert_eq!(release_tags("tool", "nightly"), ["nightly", "tool-nightly"]);
+        assert_eq!(
+            release_tags("tool", "vnightly"),
+            ["vnightly", "tool-vnightly"]
+        );
+        assert_eq!(
+            release_tags("vtool", "1.2.3"),
+            ["v1.2.3", "1.2.3", "vtool-1.2.3", "vtool-v1.2.3"]
+        );
     }
 
     #[test]

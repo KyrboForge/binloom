@@ -309,9 +309,11 @@ fn resolve_binloom_release(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::sources::CargoSource;
+    use crate::domain::manifest::Manifest;
     use crate::domain::sources::release::{Release, ReleaseAsset};
+    use crate::domain::sources::{CargoSource, release_tags};
     use crate::http_fixture::{Response, Server};
+    use std::fs;
 
     fn asset(name: &str) -> ReleaseAsset {
         ReleaseAsset {
@@ -339,6 +341,45 @@ mod tests {
         );
 
         ensure_minimum_release_age(&release, 12 * 60, now).unwrap();
+    }
+
+    #[test]
+    fn added_versions_round_trip_through_tag_lookup_to_the_lock() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("binloom.toml");
+
+        for (name, input) in [
+            ("tool", "nightly"),
+            ("tool", "tool-nightly"),
+            ("tool", "vnightly"),
+            ("tool", "latest-build"),
+            ("tool", "2024-01-01"),
+            ("tool", "v1.2.3"),
+            ("tool", "tool-v1.2.3"),
+            ("jq", "jq-1.8.2"),
+            ("vtool", "vtool-1.2.3"),
+        ] {
+            // What `binloom add` writes to binloom.toml.
+            let manifest_version = bare_version(name, input);
+            fs::write(
+                &path,
+                format!(
+                    "manifest-version = 1\n\n[binloom]\nversion = \"0.1.0\"\n\n[tools.{name}]\nversion = \"{manifest_version}\"\nsource = \"github:owner/{name}\"\n"
+                ),
+            )
+            .unwrap();
+            let manifest = Manifest::try_from(path.as_path()).unwrap();
+            let tags = release_tags(name, &manifest.tools[name].version);
+
+            assert!(tags.contains(&input.to_owned()), "{input}: {tags:?}");
+            for tag in tags {
+                assert_eq!(
+                    version_from_tag(&tag, name).unwrap(),
+                    manifest.tools[name].version,
+                    "{input} resolved as {tag}"
+                );
+            }
+        }
     }
 
     #[test]

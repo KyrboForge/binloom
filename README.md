@@ -162,6 +162,8 @@ Binloom tries `v{version}`, `{version}`, `{tool}-{version}`, and
 `{tool}-v{version}` release tags.
 `binloom add` accepts any of those spellings, such as `--version v4.54.3` or
 `--version jq-1.8.2`, and stores the bare version in `binloom.toml`.
+The `v` spellings are only tried for versions that start with a digit, so a
+`nightly` version never resolves a `vnightly` tag.
 `{os}` matches `macos`/`darwin` and `linux`; `{arch}` matches `aarch64`/`arm64`
 and `x86_64`/`amd64`/`x64`/`x86-64`. Every platform in the lockfile must
 resolve to its own asset: a pattern that names a single platform, such as

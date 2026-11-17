@@ -1,6 +1,9 @@
 use crate::{
     common::{validate_tool_name, validate_version},
-    domain::{lockfile::Lockfile, sources::Source},
+    domain::{
+        lockfile::Lockfile,
+        sources::{Source, bare_version},
+    },
 };
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
@@ -69,6 +72,12 @@ impl TryFrom<&Path> for Manifest {
             validate_tool_name(name)?;
             validate_version(&tool.version)
                 .with_context(|| format!("invalid version for tool {name}"))?;
+            let bare = bare_version(name, &tool.version);
+            ensure!(
+                matches!(tool.source, Source::Cargo(_)) || bare == tool.version,
+                "version {} for tool {name} must be written as {bare} to match binloom.lock",
+                tool.version
+            );
             if matches!(tool.source, Source::Cargo(_)) {
                 ensure!(
                     tool.asset.is_none(),
@@ -200,6 +209,32 @@ source = "cargo:example"
             error.to_string(),
             "Cargo tool example does not support release asset patterns"
         );
+    }
+
+    #[test]
+    fn rejects_release_tag_prefixed_versions_but_not_nonnumeric_ones() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("binloom.toml");
+        let manifest = |version: &str| {
+            format!(
+                "manifest-version = 1\n\n[binloom]\nversion = \"0.1.0\"\n\n[tools.tool]\nversion = \"{version}\"\nsource = \"github:owner/tool\"\n"
+            )
+        };
+
+        for version in ["nightly", "vnightly", "1.2.3"] {
+            fs::write(&path, manifest(version)).unwrap();
+            assert!(Manifest::try_from(path.as_path()).is_ok(), "{version}");
+        }
+        for (version, bare) in [("v1.2.3", "1.2.3"), ("tool-nightly", "nightly")] {
+            fs::write(&path, manifest(version)).unwrap();
+            let error = Manifest::try_from(path.as_path()).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("must be written as {bare}")),
+                "{error}"
+            );
+        }
     }
 
     #[test]
