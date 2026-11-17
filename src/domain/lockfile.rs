@@ -227,7 +227,7 @@ impl TryFrom<&str> for ArtifactFormat {
             Ok(Self::TarBz2)
         } else if ends_with(".gz") {
             Ok(Self::Gz)
-        } else if [".tar", ".xz", ".zst", ".bz2", ".7z", ".rar"]
+        } else if [".tar", ".xz", ".zst", ".zstd", ".bz2", ".7z", ".rar"]
             .iter()
             .any(|suffix| ends_with(suffix))
         {
@@ -503,6 +503,7 @@ artifacts = {}
             let decoded: ArtifactFormat = serialized.try_into().unwrap();
             assert_eq!(format!("{decoded:?}"), format!("{format:?}"));
         }
+        assert!(ArtifactFormat::try_from("tool.zstd").is_err());
         let error = ArtifactFormat::try_from("tool.7z").unwrap_err().to_string();
         assert!(error.contains("unsupported asset format: tool.7z"));
         for format in [
