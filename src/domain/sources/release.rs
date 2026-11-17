@@ -214,6 +214,20 @@ impl Release {
             emitted_warnings,
         );
 
+        // Releases often ship one archive in several compressions; `.tar.gz`
+        // is the long-standing choice, so the others never make it ambiguous.
+        let matches = Self::prefer(
+            matches,
+            "tar.gz over other archive formats",
+            |asset| {
+                matches!(
+                    ArtifactFormat::try_from(asset.name.as_str()),
+                    Ok(ArtifactFormat::Raw | ArtifactFormat::Gz | ArtifactFormat::TarGz)
+                )
+            },
+            emitted_warnings,
+        );
+
         match matches.as_slice() {
             [asset] => Ok(asset),
             [] => bail!("no release asset matched {tool_name} for {platform}"),
@@ -931,13 +945,11 @@ mod tests {
             .find_asset("tool", Platform::LinuxX86_64, &mut warnings)
             .unwrap();
 
+        // Holds whether the other formats are unsupported or merely ranked lower.
         assert_eq!(matched.name, "tool-x86_64-unknown-linux-musl.tar.gz");
-        assert!(
-            warnings
-                .iter()
-                .any(|w| w.contains("supported asset format")),
-            "{warnings:?}"
-        );
+        for dropped in ["musl.zip", "musl.tar.xz"] {
+            assert!(warnings.iter().any(|w| w.contains(dropped)), "{warnings:?}");
+        }
     }
 
     #[test]
