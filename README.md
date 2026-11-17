@@ -228,8 +228,8 @@ itself atomically from the locked release asset and restarts.
 
 Binloom currently supports public GitHub and GitLab Releases plus public
 crates.io packages. Release assets may be raw executables, gzip-compressed
-executables, or `.tar.gz`/`.tgz`, `.tar.xz`, `.zip`, `.tar.zst`, and `.tar.bz2`
-archives holding the tool binary: a regular file named after the tool, or the
+executables, or `.tar.gz`/`.tgz`, `.tar.xz`/`.txz`, `.zip`, `.tar.zst`/`.tar.zstd`,
+and `.tar.bz2`/`.tbz2` archives holding the tool binary: a regular file named after the tool, or the
 archive's only regular file. Archive paths, links, and special files are validated
 before extraction; only the selected file is written. Each decompressed entry is
 limited to 512 MiB (including single `.gz` executables). Binloom's own bootstrap
