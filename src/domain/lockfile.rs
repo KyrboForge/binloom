@@ -228,7 +228,7 @@ impl TryFrom<&str> for ArtifactFormat {
         } else if ends_with(".gz") {
             Ok(Self::Gz)
         } else if [
-            ".tar", ".xz", ".zst", ".zstd", ".bz2", ".7z", ".rar", ".lz4", ".lz", ".lzma", ".br", ".z",
+            ".tar", ".xz", ".zst", ".zstd", ".bz2", ".tbz", ".7z", ".rar", ".lz4", ".lz", ".lzma", ".br", ".z",
         ]
         .iter()
         .any(|suffix| ends_with(suffix))
@@ -511,6 +511,7 @@ artifacts = {}
         assert!(ArtifactFormat::try_from("tool.zstd").is_err());
         for unsupported in [
             "tool.tar.lz4",
+            "tool.tbz",
             "tool.tar.LZMA",
             "tool.tar.br",
             "tool.lz4",
