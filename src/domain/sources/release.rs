@@ -19,6 +19,15 @@ pub(crate) struct ReleaseAsset {
     pub(crate) sha256: Option<String>,
 }
 
+fn is_tar_archive(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.ends_with(".tar.gz") || name.ends_with(".tgz")
+}
+
+fn is_single_file_gzip(name: &str) -> bool {
+    name.to_ascii_lowercase().ends_with(".gz") && !is_tar_archive(name)
+}
+
 impl Release {
     pub(crate) fn find_asset_by_pattern(
         &self,
@@ -100,17 +109,14 @@ impl Release {
         let gzip_matches = matches
             .iter()
             .copied()
-            .filter(|asset| {
-                let name = asset.name.to_ascii_lowercase();
-                name.ends_with(".gz") || name.ends_with(".tgz")
-            })
+            .filter(|asset| is_single_file_gzip(&asset.name))
             .collect::<Vec<_>>();
 
         let matches = if gzip_matches.len() == 1 {
             Self::warn_dropped(
                 &matches,
                 &gzip_matches,
-                "the only gzip candidate",
+                "the only single-file gzip candidate",
                 emitted_warnings,
             );
             gzip_matches
@@ -150,11 +156,17 @@ impl Release {
 
         let matches = Self::prefer(
             matches,
-            "gzip format",
-            |asset| {
-                let name = asset.name.to_ascii_lowercase();
-                name.ends_with(".gz") || name.ends_with(".tgz")
-            },
+            "single-file gzip format",
+            |asset| is_single_file_gzip(&asset.name),
+            emitted_warnings,
+        );
+
+        // A raw executable always installs; a tar archive may not contain a
+        // file named after the tool (yq ships `yq_linux_amd64` plus man pages).
+        let matches = Self::prefer(
+            matches,
+            "directly installable asset over a tar archive",
+            |asset| !is_tar_archive(&asset.name),
             emitted_warnings,
         );
 
@@ -664,7 +676,7 @@ mod tests {
     }
 
     #[test]
-    fn prefers_tgz_over_raw_asset_in_both_preference_passes() {
+    fn prefers_raw_asset_over_tar_archive_but_single_file_gzip_over_both() {
         for other_gzip in [false, true] {
             let mut release = Release {
                 tag: "v1.0.0".to_owned(),
@@ -679,8 +691,83 @@ mod tests {
                 .find_asset("tool", Platform::MacosAarch64, &mut BTreeSet::new())
                 .unwrap();
 
-            assert_eq!(matched.name, "tool-macos-arm64.tgz");
+            let expected = if other_gzip {
+                "tool-darwin-arm64.gz"
+            } else {
+                "tool-macos-arm64"
+            };
+            assert_eq!(matched.name, expected);
         }
+    }
+
+    #[test]
+    fn selects_yq_raw_binary_over_tar_archive_for_every_platform() {
+        let release = Release {
+            tag: "v4.54.3".to_owned(),
+            published_at: None,
+            assets: vec![
+                asset("checksums"),
+                asset("checksums-bsd"),
+                asset("checksums_hashes_order"),
+                asset("extract-checksum.sh"),
+                asset("yq_darwin_amd64"),
+                asset("yq_darwin_amd64.tar.gz"),
+                asset("yq_darwin_arm64"),
+                asset("yq_darwin_arm64.tar.gz"),
+                asset("yq_freebsd_amd64"),
+                asset("yq_freebsd_amd64.tar.gz"),
+                asset("yq_linux_386"),
+                asset("yq_linux_386.tar.gz"),
+                asset("yq_linux_amd64"),
+                asset("yq_linux_amd64.tar.gz"),
+                asset("yq_linux_arm64"),
+                asset("yq_linux_arm64.tar.gz"),
+                asset("yq_linux_mips"),
+                asset("yq_man_page_only.tar.gz"),
+                asset("yq_windows_amd64.exe"),
+                asset("yq_windows_amd64.zip"),
+            ],
+        };
+        let expected = [
+            (Platform::MacosAarch64, "yq_darwin_arm64"),
+            (Platform::MacosX86_64, "yq_darwin_amd64"),
+            (Platform::LinuxAarch64, "yq_linux_arm64"),
+            (Platform::LinuxX86_64, "yq_linux_amd64"),
+        ];
+
+        for (platform, name) in expected {
+            let mut emitted_warnings = BTreeSet::new();
+            let matched = release
+                .find_asset("yq", platform, &mut emitted_warnings)
+                .unwrap();
+
+            assert_eq!(matched.name, name);
+            assert!(
+                emitted_warnings
+                    .iter()
+                    .any(|warning| warning.contains("tar archive")
+                        && warning.contains(&format!("{name}.tar.gz"))),
+                "{emitted_warnings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn still_selects_archive_only_releases() {
+        let release = Release {
+            tag: "v0.11.0".to_owned(),
+            published_at: None,
+            assets: vec![
+                asset("shellcheck-v0.11.0.darwin.aarch64.tar.gz"),
+                asset("shellcheck-v0.11.0.linux.x86_64.tar.gz"),
+            ],
+        };
+
+        let matched = release
+            .find_asset("shellcheck", Platform::LinuxX86_64, &mut BTreeSet::new())
+            .unwrap();
+
+        assert_eq!(matched.name, "shellcheck-v0.11.0.linux.x86_64.tar.gz");
     }
 
     #[test]
