@@ -158,7 +158,8 @@ source = "github:owner/example"
 asset = "example_{version}_{os}_{arch}.gz"
 ```
 
-Binloom tries `v{version}`, `{version}`, and `{tool}-{version}` release tags.
+Binloom tries `v{version}`, `{version}`, `{tool}-{version}`, and
+`{tool}-v{version}` release tags.
 `binloom add` accepts any of those spellings, such as `--version v4.54.3` or
 `--version jq-1.8.2`, and stores the bare version in `binloom.toml`.
 `{os}` matches `macos`/`darwin` and `linux`; `{arch}` matches `aarch64`/`arm64`

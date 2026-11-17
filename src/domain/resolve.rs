@@ -4,7 +4,7 @@ use crate::domain::lockfile::{
 };
 use crate::domain::manifest::Tool;
 use crate::domain::platform::Platform;
-use crate::domain::sources::{Source, release};
+use crate::domain::sources::{Source, bare_version, release};
 use crate::download;
 use crate::download::Client;
 use anyhow::{Context, bail};
@@ -115,10 +115,8 @@ fn resolve_checksum(
 }
 
 fn version_from_tag(tag: &str, name: &str) -> anyhow::Result<String> {
-    let version = tag
-        .strip_prefix('v')
-        .or_else(|| tag.strip_prefix(name)?.strip_prefix('-'))
-        .unwrap_or(tag);
+    // Same stripping as `binloom add`, so the lock matches the manifest.
+    let version = bare_version(name, tag);
 
     validate_version(version)
         .with_context(|| format!("release tag {tag} contains an unsafe version"))?;
@@ -348,7 +346,7 @@ mod tests {
         assert_eq!(version_from_tag("v1.2.3", "tool").unwrap(), "1.2.3");
         assert_eq!(version_from_tag("1.2.3", "tool").unwrap(), "1.2.3");
 
-        for tag in ["v/tmp/x", "v../../x", r"v..\..\x", "v.hidden"] {
+        for tag in ["v/tmp/x", "v../../x", r"v..\..\x", ".hidden"] {
             assert!(version_from_tag(tag, "tool").is_err(), "{tag:?}");
         }
     }
@@ -552,6 +550,8 @@ mod tests {
             version_from_tag("cargo-nextest-0.9.143", "cargo-nextest").unwrap(),
             "0.9.143"
         );
+        assert_eq!(version_from_tag("tool-v1.2.3", "tool").unwrap(), "1.2.3");
+        assert_eq!(version_from_tag("vtool-1.2.3", "vtool").unwrap(), "1.2.3");
     }
 
     #[test]

@@ -18,14 +18,18 @@ pub(crate) trait ReleaseProvider {
     fn fetch_latest_release(&self, client: &Client) -> Result<Release>;
 }
 
-/// Strips a `v` or `{name}-` release-tag prefix so `v4.54.3` and `jq-1.8.2`
-/// store the same bare version as `4.54.3` and `1.8.2`; `release_tags`
-/// still tries the prefixed tags when resolving.
+/// Strips the `{name}-` and `v` release-tag prefixes so `v4.54.3`, `jq-1.8.2`
+/// and `jq-v1.8.2` all yield a bare version. The tool name is stripped first
+/// so a tool called `vtool` keeps its digits; `release_tags` still tries the
+/// prefixed spellings when resolving.
 pub(crate) fn bare_version<'a>(name: &str, version: &'a str) -> &'a str {
+    let version = version
+        .strip_prefix(name)
+        .and_then(|rest| rest.strip_prefix('-'))
+        .unwrap_or(version);
     version
         .strip_prefix('v')
         .filter(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
-        .or_else(|| version.strip_prefix(name)?.strip_prefix('-'))
         .unwrap_or(version)
 }
 
@@ -37,6 +41,7 @@ fn release_tags(name: &str, version: &str) -> Vec<String> {
             format!("v{version}"),
             version.to_owned(),
             format!("{name}-{version}"),
+            format!("{name}-v{version}"),
         ]
     }
 }
@@ -120,7 +125,12 @@ mod tests {
     fn builds_common_release_tags() {
         assert_eq!(
             release_tags("cargo-nextest", "0.9.143"),
-            ["v0.9.143", "0.9.143", "cargo-nextest-0.9.143"]
+            [
+                "v0.9.143",
+                "0.9.143",
+                "cargo-nextest-0.9.143",
+                "cargo-nextest-v0.9.143"
+            ]
         );
     }
 
@@ -133,7 +143,9 @@ mod tests {
     fn strips_release_tag_prefixes_from_versions() {
         assert_eq!(bare_version("yq", "v4.54.3"), "4.54.3");
         assert_eq!(bare_version("jq", "jq-1.8.2"), "1.8.2");
-        assert_eq!(bare_version("jq", "jq-v1.8.2"), "v1.8.2");
+        assert_eq!(bare_version("jq", "jq-v1.8.2"), "1.8.2");
+        assert_eq!(bare_version("vtool", "vtool-1.2.3"), "1.2.3");
+        assert_eq!(bare_version("vtool", "v1.2.3"), "1.2.3");
         assert_eq!(bare_version("yq", "4.54.3"), "4.54.3");
         assert_eq!(bare_version("tool", "vendor-1.0"), "vendor-1.0");
         assert_eq!(bare_version("tool", "v"), "v");
