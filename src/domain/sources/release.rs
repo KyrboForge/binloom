@@ -22,8 +22,10 @@ pub(crate) struct ReleaseAsset {
 
 /// Signatures, checksums, attestations and OS packages ship next to binaries
 /// but never install as one; `ArtifactFormat` would otherwise read them as raw.
+/// A trailing `.gz` is ignored so compressed sidecars never pass as gzip binaries.
 fn is_sidecar_or_package(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
+    let name = name.strip_suffix(".gz").unwrap_or(&name);
     [
         ".asc",
         ".sig",
@@ -35,7 +37,9 @@ fn is_sidecar_or_package(name: &str) -> bool {
         ".cert",
         ".pub",
         ".md5",
+        ".md5sum",
         ".sha1",
+        ".sha1sum",
         ".sha256",
         ".sha256sum",
         ".sha512",
@@ -150,6 +154,15 @@ impl Release {
             |asset| ArtifactFormat::try_from(asset.name.as_str()).is_ok(),
             emitted_warnings,
         );
+        // Variants are dropped before the gzip shortcut and alias preferences,
+        // so a lone `-fips.gz` never beats a plain archive and aliases only
+        // break ties among equally plain names.
+        let matches = Self::prefer(
+            matches,
+            "plain asset name",
+            |asset| self.is_plain_name(&asset.name, &tool_name, platform),
+            emitted_warnings,
+        );
         let gzip_matches = matches
             .iter()
             .copied()
@@ -167,15 +180,6 @@ impl Release {
         } else {
             matches
         };
-
-        // Variants are dropped before alias preferences so aliases only break
-        // ties among equally plain names.
-        let matches = Self::prefer(
-            matches,
-            "plain asset name",
-            |asset| self.is_plain_name(&asset.name, &tool_name, platform),
-            emitted_warnings,
-        );
 
         let matches = Self::prefer(
             matches,
@@ -848,7 +852,10 @@ mod tests {
             ".sha512",
             ".sha512sum",
             ".pem",
+            ".md5sum",
+            ".sha1sum",
             ".sbom.json",
+            ".sbom.json.gz",
             ".intoto.jsonl",
         ]
         .iter()
@@ -889,6 +896,42 @@ mod tests {
 
             assert_eq!(matched.name, expected, "{installables:?}");
         }
+    }
+
+    #[test]
+    fn prefers_plain_archive_over_lone_gzip_variant() {
+        let release = Release {
+            tag: "v1.0.0".to_owned(),
+            published_at: None,
+            assets: vec![
+                asset("tool-linux-amd64.tar.gz"),
+                asset("tool-fips-linux-amd64.gz"),
+            ],
+        };
+
+        let matched = release
+            .find_asset("tool", Platform::LinuxX86_64, &mut BTreeSet::new())
+            .unwrap();
+
+        assert_eq!(matched.name, "tool-linux-amd64.tar.gz");
+    }
+
+    #[test]
+    fn never_installs_unsupported_tar_bz2_next_to_tar_gz() {
+        let release = Release {
+            tag: "v1.0.0".to_owned(),
+            published_at: None,
+            assets: vec![
+                asset("tool-x86_64-unknown-linux-musl.tar.bz2"),
+                asset("tool-x86_64-unknown-linux-musl.tar.gz"),
+            ],
+        };
+
+        let matched = release
+            .find_asset("tool", Platform::LinuxX86_64, &mut BTreeSet::new())
+            .unwrap();
+
+        assert_eq!(matched.name, "tool-x86_64-unknown-linux-musl.tar.gz");
     }
 
     #[test]
