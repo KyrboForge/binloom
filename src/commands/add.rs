@@ -9,7 +9,10 @@ use anyhow::{Context, Result, ensure};
 use super::{install, update};
 use crate::{
     common::{LOCKFILE, MANIFEST, project_root, validate_tool_name, validate_version},
-    domain::{manifest::Manifest, sources::Source},
+    domain::{
+        manifest::Manifest,
+        sources::{Source, bare_version},
+    },
 };
 
 pub(crate) fn add(name: &str, source: &str, version: &str, asset: Option<&str>) -> Result<()> {
@@ -80,6 +83,7 @@ fn write_tool(
     asset: Option<&str>,
 ) -> Result<()> {
     validate_tool_name(name)?;
+    let version = bare_version(name, version);
     validate_version(version)?;
     let manifest = Manifest::try_from(path)?;
     ensure!(
@@ -169,6 +173,24 @@ mod tests {
         );
         assert_eq!(fs::read(&manifest_path).unwrap(), manifest);
         assert_eq!(fs::read(&lock_path).unwrap(), lockfile);
+    }
+
+    #[test]
+    fn stores_bare_version_for_release_tag_input() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("binloom.toml");
+
+        fs::write(
+            &path,
+            "manifest-version = 1\n\n[binloom]\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        write_tool(&path, "yq", "github:mikefarah/yq", "v4.54.3", None).unwrap();
+        write_tool(&path, "jq", "github:jqlang/jq", "jq-1.8.2", None).unwrap();
+        let manifest = Manifest::try_from(path.as_path()).unwrap();
+
+        assert_eq!(manifest.tools["yq"].version, "4.54.3");
+        assert_eq!(manifest.tools["jq"].version, "1.8.2");
     }
 
     #[test]

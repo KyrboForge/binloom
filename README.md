@@ -144,8 +144,12 @@ GitLab projects may use nested groups. `GITLAB_TOKEN` optionally authenticates
 GitLab API requests through the `PRIVATE-TOKEN` header. Public repositories are
 supported; private asset downloads are not.
 
-GitHub and GitLab sources use prebuilt release assets. When automatic matching
-is ambiguous, an optional pattern can select one asset for each platform:
+GitHub and GitLab sources use prebuilt release assets. Automatic matching keeps
+assets that name the tool, the OS, and the architecture, then prefers a plain
+name, a single-file `.gz`, and a raw executable over a `.tar.gz`/`.tgz` archive
+that might not contain the tool binary; every dropped candidate is reported as
+a warning. When that is still ambiguous, an optional pattern can select one
+asset for each platform:
 
 ```toml
 [tools.example]
@@ -154,7 +158,18 @@ source = "github:owner/example"
 asset = "example_{version}_{os}_{arch}.gz"
 ```
 
-Binloom tries `v{version}`, `{version}`, and `{tool}-{version}` release tags.
+Binloom tries `v{version}`, `{version}`, `{tool}-{version}`, and
+`{tool}-v{version}` release tags.
+`binloom add` accepts any of those spellings, such as `--version v4.54.3` or
+`--version jq-1.8.2`, and stores the bare version in `binloom.toml`.
+The `v` spellings are only tried for versions that start with a digit, so a
+`nightly` version never resolves a `vnightly` tag.
+`{os}` matches `macos`/`darwin` and `linux`; `{arch}` matches `aarch64`/`arm64`
+and `x86_64`/`amd64`/`x64`/`x86-64`. Every platform in the lockfile must
+resolve to its own asset: a pattern that names a single platform, such as
+`example_{version}_darwin_arm64.tar.gz`, or an asset that is shared across
+platforms is rejected instead of locking the wrong binary for other targets.
+The only accepted sharing is one macOS universal binary for both macOS targets.
 `{target}` expands to Binloom's portable target for each platform. For example,
 cargo-nextest can use its prebuilt releases without requiring Rust:
 

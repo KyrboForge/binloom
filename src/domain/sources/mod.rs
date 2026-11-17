@@ -18,16 +18,35 @@ pub(crate) trait ReleaseProvider {
     fn fetch_latest_release(&self, client: &Client) -> Result<Release>;
 }
 
-fn release_tags(name: &str, version: &str) -> Vec<String> {
-    if version.starts_with('v') {
-        vec![version.to_owned(), format!("{name}-{version}")]
-    } else {
-        vec![
-            format!("v{version}"),
-            version.to_owned(),
-            format!("{name}-{version}"),
-        ]
-    }
+/// Strips the `{name}-` and `v` release-tag prefixes so `v4.54.3`, `jq-1.8.2`
+/// and `jq-v1.8.2` all yield a bare version. The tool name is stripped first
+/// so a tool called `vtool` keeps its digits; `release_tags` still tries the
+/// prefixed spellings when resolving.
+pub(crate) fn bare_version<'a>(name: &str, version: &'a str) -> &'a str {
+    let version = version
+        .strip_prefix(name)
+        .and_then(|rest| rest.strip_prefix('-'))
+        .unwrap_or(version);
+    version
+        .strip_prefix('v')
+        .filter(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+        .unwrap_or(version)
+}
+
+/// Only tags that strip back to the same bare version are tried, so the locked
+/// version matches the manifest (`nightly` never resolves `vnightly`), while a
+/// `v0.3.2` Binloom pin still finds its tag.
+pub(crate) fn release_tags(name: &str, version: &str) -> Vec<String> {
+    let bare = bare_version(name, version);
+    [
+        format!("v{version}"),
+        version.to_owned(),
+        format!("{name}-{version}"),
+        format!("{name}-v{version}"),
+    ]
+    .into_iter()
+    .filter(|tag| bare_version(name, tag) == bare)
+    .collect()
 }
 
 #[derive(Debug, Deserialize)]
@@ -109,13 +128,42 @@ mod tests {
     fn builds_common_release_tags() {
         assert_eq!(
             release_tags("cargo-nextest", "0.9.143"),
-            ["v0.9.143", "0.9.143", "cargo-nextest-0.9.143"]
+            [
+                "v0.9.143",
+                "0.9.143",
+                "cargo-nextest-0.9.143",
+                "cargo-nextest-v0.9.143"
+            ]
         );
     }
 
     #[test]
-    fn builds_release_tags_for_v_prefixed_version() {
-        assert_eq!(release_tags("tool", "v1.2.3"), ["v1.2.3", "tool-v1.2.3"]);
+    fn builds_only_unprefixed_release_tags_for_nonnumeric_versions() {
+        assert_eq!(release_tags("tool", "nightly"), ["nightly", "tool-nightly"]);
+        assert_eq!(
+            release_tags("binloom", "v0.3.2"),
+            ["v0.3.2", "binloom-v0.3.2"]
+        );
+        assert_eq!(
+            release_tags("tool", "vnightly"),
+            ["vnightly", "tool-vnightly"]
+        );
+        assert_eq!(
+            release_tags("vtool", "1.2.3"),
+            ["v1.2.3", "1.2.3", "vtool-1.2.3", "vtool-v1.2.3"]
+        );
+    }
+
+    #[test]
+    fn strips_release_tag_prefixes_from_versions() {
+        assert_eq!(bare_version("yq", "v4.54.3"), "4.54.3");
+        assert_eq!(bare_version("jq", "jq-1.8.2"), "1.8.2");
+        assert_eq!(bare_version("jq", "jq-v1.8.2"), "1.8.2");
+        assert_eq!(bare_version("vtool", "vtool-1.2.3"), "1.2.3");
+        assert_eq!(bare_version("vtool", "v1.2.3"), "1.2.3");
+        assert_eq!(bare_version("yq", "4.54.3"), "4.54.3");
+        assert_eq!(bare_version("tool", "vendor-1.0"), "vendor-1.0");
+        assert_eq!(bare_version("tool", "v"), "v");
     }
 
     #[test]
