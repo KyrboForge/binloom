@@ -19,6 +19,11 @@ use std::{
 };
 use tar::{Archive, EntryType};
 
+pub(crate) fn install_with_prompt(no_prompt: bool) -> Result<()> {
+    install()?;
+    super::shell::maybe_prompt(&project_root()?, no_prompt)
+}
+
 pub(crate) fn install() -> Result<()> {
     let root = project_root()?;
     let lock_path = root.join(LOCKFILE);
@@ -43,7 +48,37 @@ pub(super) fn install_from(root: &Path, client: &download::Client) -> Result<()>
     let lockfile = Lockfile::try_from(lock_path.as_path())?;
 
     manifest.ensure_matches_lockfile(&lockfile)?;
-    ensure!(!lockfile.tools.is_empty(), "no tools in binloom.lock");
+
+    // Case-insensitive filesystems would alias `.tools/.bin/Binloom` to the manager link.
+    ensure!(
+        !lockfile
+            .tools
+            .keys()
+            .any(|name| name.eq_ignore_ascii_case("binloom")),
+        "tool name binloom is reserved for the project-locked Binloom binary"
+    );
+    ensure!(
+        !lockfile.tools.is_empty() || lockfile.binloom.is_some(),
+        "no tools in binloom.lock"
+    );
+
+    if let Some(binloom) = &lockfile.binloom {
+        let cached = root
+            .join(TOOLS_DIR)
+            .join("binloom")
+            .join(&binloom.version)
+            .join("binloom");
+        let link = root.join(TOOLS_DIR).join(".bin/binloom");
+        if !cached.is_file()
+            && let (Ok(executable), Ok(link_target)) = (
+                std::env::current_exe().and_then(|path| path.canonicalize()),
+                link.canonicalize(),
+            )
+            && executable == link_target
+        {
+            bail!("locked Binloom version is not cached; run ./binloomw install");
+        }
+    }
 
     let platform = Platform::current()?;
     let platform_key = platform.to_string();
@@ -117,6 +152,33 @@ pub(super) fn install_from(root: &Path, client: &download::Client) -> Result<()>
         link_tool(root, name, &tool.version)?;
 
         println!("Installed {name} {}", tool.version);
+    }
+
+    if let Some(binloom) = &lockfile.binloom {
+        let directory = root.join(TOOLS_DIR).join("binloom").join(&binloom.version);
+        let cached = directory.join("binloom");
+        let matches = match binloom.artifacts.get(&platform_key) {
+            Some(artifact) => cached_artifact_matches(
+                &cached,
+                &directory.join(".artifact-sha256"),
+                &artifact.sha256,
+            )?,
+            None => false,
+        };
+        if matches {
+            link_tool(root, "binloom", &binloom.version)?;
+        } else {
+            // A link left by an older lock would keep the wrong Binloom active.
+            let link = root.join(TOOLS_DIR).join(".bin/binloom");
+            if link.symlink_metadata().is_ok() {
+                fs::remove_file(&link)
+                    .with_context(|| format!("failed to remove {}", link.display()))?;
+            }
+            eprintln!(
+                "warning: Binloom {} from binloom.lock is not cached; run ./binloomw install",
+                binloom.version
+            );
+        }
     }
 
     Ok(())

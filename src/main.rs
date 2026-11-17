@@ -10,7 +10,7 @@ mod download;
 mod http_fixture;
 
 use clap::{Parser, Subcommand};
-use commands::{add, exec, init, install, list, path, update};
+use commands::{add, env, exec, init, install, list, path, shell, update};
 use std::ffi::OsString;
 use std::process::ExitCode;
 
@@ -26,7 +26,11 @@ enum Command {
     #[command(about = "Initialize the repository")]
     Init,
     #[command(about = "Install the tools")]
-    Install,
+    Install {
+        /// Skip the one-time shell activation question (also BINLOOM_NO_PROMPT=1)
+        #[arg(long)]
+        no_prompt: bool,
+    },
     #[command(about = "Update tools and Binloom")]
     Update {
         /// Tool to update; omit to update all tools and Binloom
@@ -45,6 +49,16 @@ enum Command {
     List,
     #[command(about = "Show the path")]
     Path,
+    /// Print shell commands to activate this project's tools
+    Env {
+        #[arg(long, value_enum)]
+        shell: env::Shell,
+    },
+    /// Configure trusted, directory-scoped shell activation
+    Shell {
+        #[command(subcommand)]
+        command: shell::Command,
+    },
     #[command(about = "Add a tool")]
     Add {
         /// Name used as the installed command
@@ -83,9 +97,11 @@ fn main() -> ExitCode {
                 update::update(tool.as_deref())
             }
         }
-        Command::Install => install::install(),
+        Command::Install { no_prompt } => install::install_with_prompt(*no_prompt),
         Command::Exec { command } => exec::exec(command),
         Command::Path => path::path(),
+        Command::Env { shell } => env::env(*shell),
+        Command::Shell { command } => shell::run(command),
         Command::Add {
             name,
             source,
