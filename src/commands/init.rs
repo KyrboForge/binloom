@@ -114,6 +114,20 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::{fs, io, process::Command};
 
+    /// Another test may still hold a freshly written wrapper open for writing when this one
+    /// execs it; the child inherits that descriptor until exec and fails with ETXTBSY.
+    fn run_wrapper(command: &mut Command) -> std::process::Output {
+        for _ in 0..50 {
+            match command.output() {
+                Err(error) if error.kind() == io::ErrorKind::ExecutableFileBusy => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                result => return result.unwrap(),
+            }
+        }
+        panic!("wrapper stayed busy");
+    }
+
     fn checksum(bytes: &[u8]) -> String {
         Sha256::digest(bytes)
             .iter()
@@ -252,12 +266,7 @@ format = "raw"
             original_lock
         );
 
-        let run = || {
-            Command::new(&wrapper)
-                .args(["hello", "world"])
-                .output()
-                .unwrap()
-        };
+        let run = || run_wrapper(Command::new(&wrapper).args(["hello", "world"]));
 
         let first = run();
         assert!(first.status.success());
@@ -334,10 +343,7 @@ sha256 = "{checksum}"
         )
         .unwrap();
 
-        let output = Command::new(&wrapper)
-            .args(["hello", "world"])
-            .output()
-            .unwrap();
+        let output = run_wrapper(Command::new(&wrapper).args(["hello", "world"]));
 
         assert!(output.status.success());
         assert_eq!(
@@ -373,7 +379,7 @@ format = "raw"
         )
         .unwrap();
 
-        let output = Command::new(&wrapper).output().unwrap();
+        let output = run_wrapper(&mut Command::new(&wrapper));
 
         assert!(!output.status.success());
         assert!(
@@ -403,7 +409,7 @@ sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
         )
         .unwrap();
 
-        let output = Command::new(&wrapper).output().unwrap();
+        let output = run_wrapper(&mut Command::new(&wrapper));
 
         assert!(!output.status.success());
         assert!(
