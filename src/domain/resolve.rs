@@ -7,7 +7,7 @@ use crate::domain::platform::Platform;
 use crate::domain::sources::{Source, bare_version, release};
 use crate::download;
 use crate::download::Client;
-use anyhow::{Context, bail};
+use anyhow::{Context, bail, ensure};
 use std::collections::{BTreeMap, BTreeSet};
 use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime};
@@ -120,6 +120,11 @@ fn version_from_tag(tag: &str, name: &str) -> anyhow::Result<String> {
 
     validate_version(version)
         .with_context(|| format!("release tag {tag} contains an unsafe version"))?;
+    // `tool-tool-nightly` strips to `tool-nightly`, which the manifest would reject.
+    ensure!(
+        bare_version(name, version) == version,
+        "release tag {tag} does not name a stable version for {name}"
+    );
 
     Ok(version.to_owned())
 }
@@ -387,7 +392,14 @@ mod tests {
         assert_eq!(version_from_tag("v1.2.3", "tool").unwrap(), "1.2.3");
         assert_eq!(version_from_tag("1.2.3", "tool").unwrap(), "1.2.3");
 
-        for tag in ["v/tmp/x", "v../../x", r"v..\..\x", ".hidden"] {
+        for tag in [
+            "v/tmp/x",
+            "v../../x",
+            r"v..\..\x",
+            ".hidden",
+            "tool-tool-nightly",
+            "tool-tool-v1.2.3",
+        ] {
             assert!(version_from_tag(tag, "tool").is_err(), "{tag:?}");
         }
     }

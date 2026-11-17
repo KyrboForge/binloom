@@ -33,9 +33,11 @@ pub(crate) fn bare_version<'a>(name: &str, version: &'a str) -> &'a str {
         .unwrap_or(version)
 }
 
-/// Only tags that strip back to `version` are tried, so the locked version
-/// always equals the manifest version (`nightly` never resolves `vnightly`).
+/// Only tags that strip back to the same bare version are tried, so the locked
+/// version matches the manifest (`nightly` never resolves `vnightly`), while a
+/// `v0.3.2` Binloom pin still finds its tag.
 pub(crate) fn release_tags(name: &str, version: &str) -> Vec<String> {
+    let bare = bare_version(name, version);
     [
         format!("v{version}"),
         version.to_owned(),
@@ -43,7 +45,7 @@ pub(crate) fn release_tags(name: &str, version: &str) -> Vec<String> {
         format!("{name}-v{version}"),
     ]
     .into_iter()
-    .filter(|tag| bare_version(name, tag) == version)
+    .filter(|tag| bare_version(name, tag) == bare)
     .collect()
 }
 
@@ -138,6 +140,10 @@ mod tests {
     #[test]
     fn builds_only_unprefixed_release_tags_for_nonnumeric_versions() {
         assert_eq!(release_tags("tool", "nightly"), ["nightly", "tool-nightly"]);
+        assert_eq!(
+            release_tags("binloom", "v0.3.2"),
+            ["v0.3.2", "binloom-v0.3.2"]
+        );
         assert_eq!(
             release_tags("tool", "vnightly"),
             ["vnightly", "tool-vnightly"]
