@@ -366,9 +366,13 @@ case "$(declare -p PROMPT_COMMAND 2>/dev/null)" in
     *)
         # This branch handles scalar PROMPT_COMMAND; the branch above handles arrays.
         # shellcheck disable=SC2178,SC2128
+        # Appended on its own line so earlier commands still see the user's
+        # PIPESTATUS, and a trailing `;` in PROMPT_COMMAND stays valid.
         case ";${PROMPT_COMMAND-};" in
-            *';_binloom_hook;'*) ;;
-            *) PROMPT_COMMAND="_binloom_hook${PROMPT_COMMAND:+; $PROMPT_COMMAND}" ;;
+            *';_binloom_hook;'* | *"
+_binloom_hook;"*) ;;
+            *) PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND
+}_binloom_hook" ;;
         esac ;;
 esac
 _binloom_hook
@@ -439,9 +443,19 @@ pub(super) fn maybe_prompt(root: &Path, no_prompt: bool) -> Result<()> {
         Some("fish") => Shell::Fish,
         _ => return Ok(()),
     };
-    let home = PathBuf::from(env::var_os("HOME").context("HOME is not set")?);
-    let config = config_dir()?;
-    let executable = env::current_exe()?;
+    // Tools are already installed, so an unusable environment skips the offer
+    // instead of failing `install` before the user was ever asked.
+    let paths = (|| -> Result<_> {
+        let home = PathBuf::from(env::var_os("HOME").context("HOME is not set")?);
+        Ok((home, config_dir()?, env::current_exe()?))
+    })();
+    let (home, config, executable) = match paths {
+        Ok(paths) => paths,
+        Err(error) => {
+            eprintln!("warning: skipping shell activation setup: {error:#}");
+            return Ok(());
+        }
+    };
     let profile_dir = match shell {
         Shell::Bash => None,
         Shell::Zsh => env::var_os("ZDOTDIR"),

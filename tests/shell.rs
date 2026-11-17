@@ -330,11 +330,15 @@ fn scalar_prompt_command_preserves_previous_status() {
     let fixture = Fixture::new();
     success(fixture.bash(
         r#"
-        PROMPT_COMMAND='last_status=$?'
+        set -e
+        PROMPT_COMMAND='last_status=$? pipe="${PIPESTATUS[*]}";'
         eval "$("$BIN" shell init --shell bash)"
-        false
+        eval "$("$BIN" shell init --shell bash)"
+        false | true
         eval "$PROMPT_COMMAND"
-        test "$last_status" = 1
+        test "$last_status" = 0
+        test "$pipe" = "1 0"
+        test "$(printf '%s' "$PROMPT_COMMAND" | grep -c _binloom_hook)" = 1
     "#,
     ));
 }
