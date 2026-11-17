@@ -38,12 +38,6 @@ fn is_sidecar_or_package(name: &str) -> bool {
         ".pub",
         ".md5",
         ".md5sum",
-        ".sha1",
-        ".sha1sum",
-        ".sha256",
-        ".sha256sum",
-        ".sha512",
-        ".sha512sum",
         ".b3",
         ".sbom",
         ".spdx",
@@ -59,6 +53,18 @@ fn is_sidecar_or_package(name: &str) -> bool {
     ]
     .iter()
     .any(|suffix| name.ends_with(suffix))
+        || is_sha_digest(name)
+}
+
+/// Matches every SHA checksum spelling (`.sha384`, `.sha3-256`, `.sha512sum`)
+/// so a digest size missing from a list never passes as a raw binary.
+fn is_sha_digest(name: &str) -> bool {
+    name.rsplit_once('.')
+        .and_then(|(_, extension)| extension.strip_prefix("sha"))
+        .map(|rest| rest.strip_suffix("sum").unwrap_or(rest))
+        .is_some_and(|rest| {
+            !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit() || c == '-')
+        })
 }
 
 /// Archives are every format that is neither a raw executable nor a
@@ -851,6 +857,8 @@ mod tests {
             ".sig",
             ".minisig",
             ".sha256",
+            ".sha384",
+            ".sha3-256",
             ".sha512",
             ".sha512sum",
             ".pem",
@@ -863,6 +871,26 @@ mod tests {
         .iter()
         .map(|suffix| asset(&format!("{name}{suffix}")))
         .collect()
+    }
+
+    #[test]
+    fn never_selects_any_sha_checksum_over_a_variant_archive() {
+        for suffix in [".sha224", ".sha384", ".sha384sum", ".sha3-256"] {
+            let release = Release {
+                tag: "v1.0.0".to_owned(),
+                published_at: None,
+                assets: vec![
+                    asset("tool-linux-amd64-musl.tar.gz"),
+                    asset(&format!("tool-linux-amd64-musl{suffix}")),
+                ],
+            };
+
+            let matched = release
+                .find_asset("tool", Platform::LinuxX86_64, &mut BTreeSet::new())
+                .unwrap();
+
+            assert_eq!(matched.name, "tool-linux-amd64-musl.tar.gz", "{suffix}");
+        }
     }
 
     #[test]
