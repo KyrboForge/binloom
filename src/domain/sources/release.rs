@@ -20,13 +20,54 @@ pub(crate) struct ReleaseAsset {
     pub(crate) sha256: Option<String>,
 }
 
-fn is_tar_archive(name: &str) -> bool {
+/// Signatures, checksums, attestations and OS packages ship next to binaries
+/// but never install as one; `ArtifactFormat` would otherwise read them as raw.
+fn is_sidecar_or_package(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
-    name.ends_with(".tar.gz") || name.ends_with(".tgz")
+    [
+        ".asc",
+        ".sig",
+        ".minisig",
+        ".sigstore",
+        ".bundle",
+        ".pem",
+        ".crt",
+        ".cert",
+        ".pub",
+        ".md5",
+        ".sha1",
+        ".sha256",
+        ".sha256sum",
+        ".sha512",
+        ".sha512sum",
+        ".b3",
+        ".sbom",
+        ".spdx",
+        ".json",
+        ".jsonl",
+        ".txt",
+        ".deb",
+        ".rpm",
+        ".apk",
+        ".pkg",
+        ".dmg",
+        ".msi",
+    ]
+    .iter()
+    .any(|suffix| name.ends_with(suffix))
+}
+
+/// Archives are every format that is neither a raw executable nor a
+/// single-file gzip, so new archive formats rank below raw binaries unchanged.
+fn is_archive(name: &str) -> bool {
+    !matches!(
+        ArtifactFormat::try_from(name),
+        Ok(ArtifactFormat::Raw | ArtifactFormat::Gz)
+    )
 }
 
 fn is_single_file_gzip(name: &str) -> bool {
-    name.to_ascii_lowercase().ends_with(".gz") && !is_tar_archive(name)
+    matches!(ArtifactFormat::try_from(name), Ok(ArtifactFormat::Gz))
 }
 
 impl Release {
@@ -93,15 +134,8 @@ impl Release {
             .iter()
             .filter(|asset| {
                 let name = asset.name.to_lowercase();
-                let is_metadata = [".sha256", ".sha256sum", ".sig", ".minisig"]
-                    .iter()
-                    .any(|suffix| name.ends_with(suffix));
-                let is_package = [".deb", ".rpm", ".apk", ".pkg", ".dmg", ".msi"]
-                    .iter()
-                    .any(|suffix| name.ends_with(suffix));
 
-                !is_metadata
-                    && !is_package
+                !is_sidecar_or_package(&name)
                     && name.contains(&tool_name)
                     && platform.os_in(&name)
                     && platform.arch_in(&name)
@@ -171,12 +205,12 @@ impl Release {
             emitted_warnings,
         );
 
-        // A raw executable always installs; a tar archive may not contain a
+        // A raw executable always installs; an archive may not contain a
         // file named after the tool (yq ships `yq_linux_amd64` plus man pages).
         let matches = Self::prefer(
             matches,
-            "directly installable asset over a tar archive",
-            |asset| !is_tar_archive(&asset.name),
+            "directly installable asset over an archive",
+            |asset| !is_archive(&asset.name),
             emitted_warnings,
         );
 
@@ -327,12 +361,23 @@ impl Release {
 
         name.split(|character: char| !character.is_ascii_alphanumeric())
             .all(|token| {
-                matches!(token, "" | "tar" | "gz" | "tgz")
-                    || token
-                        .strip_prefix('v')
-                        .unwrap_or(token)
-                        .chars()
-                        .all(|character| character.is_ascii_digit())
+                matches!(
+                    token,
+                    "" | "tar"
+                        | "gz"
+                        | "tgz"
+                        | "xz"
+                        | "txz"
+                        | "zip"
+                        | "zst"
+                        | "zstd"
+                        | "bz2"
+                        | "tbz2"
+                ) || token
+                    .strip_prefix('v')
+                    .unwrap_or(token)
+                    .chars()
+                    .all(|character| character.is_ascii_digit())
             })
     }
 
@@ -755,7 +800,7 @@ mod tests {
             assert!(
                 emitted_warnings
                     .iter()
-                    .any(|warning| warning.contains("tar archive")
+                    .any(|warning| warning.contains("over an archive")
                         && warning.contains(&format!("{name}.tar.gz"))),
                 "{emitted_warnings:?}"
             );
@@ -778,6 +823,95 @@ mod tests {
             .unwrap();
 
         assert_eq!(matched.name, "shellcheck-v0.11.0.linux.x86_64.tar.gz");
+    }
+
+    fn sidecars_for(name: &str) -> Vec<ReleaseAsset> {
+        [
+            ".asc",
+            ".sig",
+            ".minisig",
+            ".sha256",
+            ".sha512",
+            ".sha512sum",
+            ".pem",
+            ".sbom.json",
+            ".intoto.jsonl",
+        ]
+        .iter()
+        .map(|suffix| asset(&format!("{name}{suffix}")))
+        .collect()
+    }
+
+    #[test]
+    fn never_selects_sidecars_in_mixed_raw_archive_releases() {
+        let cases: [(&[&str], &str); 4] = [
+            (&["tool-linux-amd64.tar.gz"], "tool-linux-amd64.tar.gz"),
+            (
+                &["tool-linux-amd64", "tool-linux-amd64.tar.gz"],
+                "tool-linux-amd64",
+            ),
+            (
+                &["tool-linux-amd64.gz", "tool-linux-amd64.tar.gz"],
+                "tool-linux-amd64.gz",
+            ),
+            (&["tool-linux-amd64.tgz"], "tool-linux-amd64.tgz"),
+        ];
+
+        for (installables, expected) in cases {
+            let mut assets = vec![asset("checksums.txt"), asset("SHA512SUMS.asc")];
+            for name in installables {
+                assets.push(asset(name));
+                assets.extend(sidecars_for(name));
+            }
+            let release = Release {
+                tag: "v1.0.0".to_owned(),
+                published_at: None,
+                assets,
+            };
+
+            let matched = release
+                .find_asset("tool", Platform::LinuxX86_64, &mut BTreeSet::new())
+                .unwrap();
+
+            assert_eq!(matched.name, expected, "{installables:?}");
+        }
+    }
+
+    #[test]
+    fn rejects_releases_with_only_sidecars_for_the_platform() {
+        let release = Release {
+            tag: "v1.0.0".to_owned(),
+            published_at: None,
+            assets: sidecars_for("tool-linux-amd64"),
+        };
+
+        let error = release
+            .find_asset("tool", Platform::LinuxX86_64, &mut BTreeSet::new())
+            .unwrap_err();
+
+        assert!(error.to_string().starts_with("no release asset matched"));
+    }
+
+    #[test]
+    fn ranks_every_archive_suffix_below_raw_binaries() {
+        for suffix in [
+            ".tar.gz",
+            ".tgz",
+            ".tar.xz",
+            ".txz",
+            ".zip",
+            ".tar.zst",
+            ".tar.zstd",
+            ".tar.bz2",
+            ".tbz2",
+        ] {
+            let name = format!("tool-linux-amd64{suffix}");
+            assert!(is_archive(&name), "{name}");
+            assert!(!is_single_file_gzip(&name), "{name}");
+        }
+        assert!(!is_archive("tool-linux-amd64"));
+        assert!(!is_archive("tool-linux-amd64.gz"));
+        assert!(is_single_file_gzip("tool-linux-amd64.GZ"));
     }
 
     #[test]

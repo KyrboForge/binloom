@@ -211,9 +211,11 @@ impl TryFrom<&str> for ArtifactFormat {
                 .is_some_and(|ending| ending.eq_ignore_ascii_case(suffix))
         };
 
-        if [".zip", ".tar.xz", ".tar.zst"]
-            .iter()
-            .any(|suffix| ends_with(suffix))
+        if [
+            ".zip", ".tar", ".xz", ".txz", ".zst", ".zstd", ".bz2", ".tbz2", ".7z", ".rar",
+        ]
+        .iter()
+        .any(|suffix| ends_with(suffix))
         {
             bail!("unsupported asset format: {asset}");
         }
