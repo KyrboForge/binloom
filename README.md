@@ -117,6 +117,92 @@ single shell command:
 PATH="$(./binloomw path):$PATH" lefthook version
 ```
 
+## Shell activation
+
+For one shell session, explicitly prepend this project's absolute `.tools/.bin`:
+
+```sh
+# Bash (use --shell zsh in Zsh)
+eval "$(./binloomw env --shell bash)"
+```
+
+```fish
+./binloomw env --shell fish | source
+```
+
+Repeated activation does not add another entry when it is already first. This
+manual mode does not check trust or undo PATH changes when you leave the project;
+restore your previous PATH or start a fresh shell to deactivate it. For scripts
+and CI, `./binloomw exec <command>` keeps activation scoped to one process.
+
+For automatic activation, the first successful interactive `./binloomw install`
+in Bash, Zsh, or Fish asks once:
+
+```text
+Enable automatic project-local commands in your shell? [y/N]
+```
+
+Answering `y` trusts the current project and appends a marked block to `~/.bashrc`,
+`~/.zshrc`, or `~/.config/fish/config.fish`, selected from `$SHELL`. Existing
+contents and permissions are preserved; an existing profile gets a sibling
+`.binloom.bak` backup before atomic replacement. Symlinked profile files or parent
+directories are rejected. The block uses Binloom on PATH, with the executable
+used during setup as a fallback; no global binary is installed. Keep that cached
+executable available, or regenerate the hook from another available Binloom.
+
+Open a new shell or source the updated profile to enable it. A child process
+cannot change the PATH of the shell that ran `install`. Answering anything other
+than `y` declines; the answer is remembered in
+`$XDG_CONFIG_HOME/binloom/activation-prompt` (default
+`~/.config/binloom/activation-prompt`). `install --no-prompt`,
+`BINLOOM_NO_PROMPT=1`, unsupported shells, and noninteractive installs skip setup
+without editing a profile or recording an answer.
+
+You can also configure the hook explicitly by putting the output of
+`binloom shell init --shell bash` (or `zsh` / `fish`) in your rc file. To try it
+in the current shell, use `eval "$(./binloomw shell init --shell bash)"`, or
+`./binloomw shell init --shell fish | source` in Fish. Trust projects explicitly:
+
+```sh
+./binloomw shell trust             # nearest project, including from a subdirectory
+binloom shell trust /path/to/repo   # canonicalizes the root
+./binloomw shell status
+./binloomw shell untrust
+```
+
+The hook checks only when the working directory changes. It finds the nearest
+ancestor containing `binloom.toml` and activates it only if its canonical root
+appears in `$XDG_CONFIG_HOME/binloom/trusted` (default
+`~/.config/binloom/trusted`). The directory is created with mode `0700`, and the
+trust and answer files with `0600`. An untrusted nested project does not inherit
+its parent's trust. Interactive shells show at most one trust hint per root per
+session; noninteractive hooks stay quiet.
+
+Trust lets the project's commands shadow system commands; it does not sandbox
+their execution. The hook never runs repository scripts or downloads tools.
+The `.tools/.bin` directory must exist and resolve inside the trusted root;
+symlink escapes are rejected. On project switches or exit, only the PATH entry
+added by the hook is removed, preserving other entries and user PATH changes.
+Trust changes take effect on the next directory change. Activation paths must
+be UTF-8 and cannot contain colons or newlines.
+
+After installation, `.tools/.bin/binloom` points to
+`../binloom/<locked-version>/binloom` when that cached binary exists. An activated
+shell therefore uses the project's pinned Binloom as well as its tools. Run
+`./binloomw install` after a Binloom version update to refresh this link. The
+tool name `binloom` is reserved: installation rejects `[tools.binloom]` rather
+than overwriting that tool with the manager.
+
+To disable automatic activation, remove the rc block between
+`# >>> binloom shell activation >>>` and `# <<< binloom shell activation <<<`,
+then start a new shell. You can restore the sibling backup if needed. Remove
+the `activation-prompt` file to allow the install question again, and use
+`shell untrust` to revoke individual projects. Manual hooks can be removed from
+the rc file in the same way. `./binloomw` and `exec` keep working without hooks.
+
+Windows is currently unsupported; native Windows support is tracked in
+[#35](https://github.com/KyrboForge/binloom/issues/35).
+
 ## ⚙️ Configuration
 
 `binloom.toml` stays intentionally small:
@@ -204,8 +290,12 @@ minimum-release-age-minutes = 1440
 | `binloom exec <command> [args...]` | Run with `.tools/.bin` prepended to `PATH` |
 | `binloom list` | List configured tools and versions |
 | `binloom path` | Print the absolute `.tools/.bin` path |
+| `binloom env --shell <bash\|zsh\|fish>` | Print commands for manual PATH activation |
+| `binloom shell init --shell <bash\|zsh\|fish>` | Print directory-change hooks |
+| `binloom shell trust [path]` / `untrust [path]` | Grant or revoke project activation |
+| `binloom shell status` | Show the current project's trust status |
 
-Except for `init`, commands find the nearest parent directory containing
+Project commands find the nearest parent directory containing
 `binloom.toml`, so they also work from project subdirectories.
 
 Updates modify `binloom.toml` and `binloom.lock`. Commit both so contributors
