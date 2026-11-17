@@ -289,7 +289,8 @@ fn unpack_with_limit(
         | ArtifactFormat::TarBz2 => {
             let index = select_tar_entry(tar_decoder(format, &mut source)?, name, max_bytes)?;
             source.rewind()?;
-            let mut archive = Archive::new(tar_decoder(format, source)?);
+            let mut archive =
+                Archive::new(LimitedReader::new(tar_decoder(format, source)?, max_bytes));
             let entry = archive
                 .entries()?
                 .nth(index)
@@ -308,10 +309,54 @@ fn tar_decoder<'a>(format: ArtifactFormat, source: impl Read + 'a) -> Result<Box
             true,
             (MAX_DECOMPRESSED_BYTES / 1024) as u32,
         )),
-        ArtifactFormat::TarZst => Box::new(ruzstd::decoding::StreamingDecoder::new(source)?),
+        ArtifactFormat::TarZst => Box::new(
+            ruzstd::decoding::StreamingDecoder::new_with_max_window_size(
+                source,
+                MAX_DECOMPRESSED_BYTES,
+            )?,
+        ),
         ArtifactFormat::TarBz2 => Box::new(bzip2::read::MultiBzDecoder::new(source)),
         _ => unreachable!("expected a compressed tar format"),
     })
+}
+
+struct LimitedReader<R> {
+    source: R,
+    remaining: u64,
+    max_bytes: u64,
+}
+
+impl<R> LimitedReader<R> {
+    fn new(source: R, max_bytes: u64) -> Self {
+        Self {
+            source,
+            remaining: max_bytes,
+            max_bytes,
+        }
+    }
+}
+
+impl<R: Read> Read for LimitedReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        if self.remaining == 0 {
+            return match self.source.read(&mut [0])? {
+                0 => Ok(0),
+                _ => Err(io::Error::other(format!(
+                    "decompressed archive exceeds size limit of {} bytes",
+                    self.max_bytes
+                ))),
+            };
+        }
+        let length = buf
+            .len()
+            .min(self.remaining.min(usize::MAX as u64) as usize);
+        let read = self.source.read(&mut buf[..length])?;
+        self.remaining -= read as u64;
+        Ok(read)
+    }
 }
 
 fn copy_limited(mut source: impl Read, destination: &mut impl Write, max_bytes: u64) -> Result<()> {
@@ -361,7 +406,7 @@ fn select_zip_entry<R: Read + Seek>(archive: &mut zip::ZipArchive<R>, name: &str
 /// Validates every archive entry and picks the executable without touching the
 /// filesystem: a regular file named after the tool, or the archive's only file.
 fn select_tar_entry(source: impl Read, name: &str, max_bytes: u64) -> Result<usize> {
-    let mut archive = Archive::new(source);
+    let mut archive = Archive::new(LimitedReader::new(source, max_bytes));
     let mut files = Vec::new();
     let mut matches = Vec::new();
 
@@ -609,6 +654,63 @@ source = "github:owner/tool"
     }
 
     #[test]
+    fn rejects_zstd_frame_with_oversized_window() {
+        // Zstandard magic, frame descriptor, and a 1 GiB window descriptor.
+        let frame = [0x28, 0xb5, 0x2f, 0xfd, 0x00, 0xa0];
+        let error = tar_decoder(ArtifactFormat::TarZst, io::Cursor::new(frame))
+            .err()
+            .expect("oversized window must be rejected");
+        assert!(format!("{error:#}").to_lowercase().contains("window"));
+    }
+
+    #[test]
+    fn rejects_oversized_tar_long_name_metadata() {
+        let mut header = tar::Header::new_gnu();
+        header.set_path("././@LongLink").unwrap();
+        header.set_entry_type(EntryType::GNULongName);
+        header.set_size(4096);
+        header.set_mode(0o644);
+        header.set_cksum();
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(header.as_bytes()).unwrap();
+        encoder.write_all(&vec![b'a'; 4096]).unwrap();
+        let archive = encoder.finish().unwrap();
+        let error = unpack_with_limit(
+            ArtifactFormat::TarGz,
+            "tool",
+            io::Cursor::new(archive),
+            Vec::new(),
+            1024,
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("size limit of 1024 bytes"));
+    }
+
+    #[test]
+    fn unpacks_tar_with_long_name_under_limit() {
+        let path = format!("{}/tool", "a".repeat(120));
+        let mut builder = tar::Builder::new(GzEncoder::new(Vec::new(), Compression::default()));
+        let mut header = tar::Header::new_gnu();
+        header.set_size(6);
+        header.set_mode(0o755);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, path, &b"binary"[..])
+            .unwrap();
+        let archive = builder.into_inner().unwrap().finish().unwrap();
+        let mut output = Vec::new();
+        unpack_with_limit(
+            ArtifactFormat::TarGz,
+            "tool",
+            io::Cursor::new(archive),
+            &mut output,
+            4096,
+        )
+        .unwrap();
+        assert_eq!(output, b"binary");
+    }
+
+    #[test]
     fn unpacks_shellcheck_v0_11_0_tar_xz() {
         let format = ArtifactFormat::try_from("shellcheck-v0.11.0.darwin.aarch64.tar.xz").unwrap();
         let archive = compressed_tar(
@@ -712,7 +814,12 @@ source = "github:owner/tool"
         const LIMIT: u64 = 4096;
         for extension in ["gz", "tar.gz", "tar.xz", "zip", "tar.zst", "tar.bz2"] {
             let format = ArtifactFormat::try_from(format!("tool.{extension}").as_str()).unwrap();
-            for length in [LIMIT, LIMIT + 1] {
+            let valid_length = if extension.starts_with("tar.") {
+                LIMIT - 1024
+            } else {
+                LIMIT
+            };
+            for length in [valid_length, LIMIT + 1] {
                 let payload = vec![0; length as usize];
                 let archive = if extension == "gz" {
                     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
@@ -728,7 +835,7 @@ source = "github:owner/tool"
                 let mut output = Vec::new();
                 let result =
                     unpack_with_limit(format, "tool", io::Cursor::new(archive), &mut output, LIMIT);
-                if length == LIMIT {
+                if length == valid_length {
                     result.unwrap();
                     assert_eq!(output, payload, "{extension}");
                 } else {
