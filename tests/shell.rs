@@ -112,6 +112,37 @@ fn trust_untrust_status_and_private_files() {
 }
 
 #[test]
+fn untrust_path_revokes_its_own_grant_after_the_project_is_gone() {
+    let fixture = Fixture::new();
+    let child = fixture.root.join("nested/child");
+    let manifest = child.join("binloom.toml");
+    let trusted = fixture.home.path().join(".config/binloom/trusted");
+    fs::create_dir(&child).unwrap();
+    fixture.trust();
+
+    // Manifest removed: the parent's grant must survive.
+    fs::write(&manifest, "").unwrap();
+    success(fixture.run(&["shell", "trust", child.to_str().unwrap()]));
+    fs::remove_file(&manifest).unwrap();
+    success(fixture.run(&["shell", "untrust", child.to_str().unwrap()]));
+    assert_eq!(
+        fs::read_to_string(&trusted).unwrap(),
+        format!("{}\n", fixture.root.display())
+    );
+
+    // Directory removed: the stored root is still revocable.
+    fs::write(&manifest, "").unwrap();
+    success(fixture.run(&["shell", "trust", child.to_str().unwrap()]));
+    fs::remove_file(&manifest).unwrap();
+    fs::remove_dir(&child).unwrap();
+    success(fixture.run(&["shell", "untrust", child.to_str().unwrap()]));
+    assert_eq!(
+        fs::read_to_string(&trusted).unwrap(),
+        format!("{}\n", fixture.root.display())
+    );
+}
+
+#[test]
 fn init_prints_native_hooks_for_each_shell() {
     let fixture = Fixture::new();
     for (shell, marker) in [

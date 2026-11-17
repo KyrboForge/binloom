@@ -18,7 +18,7 @@ pub(crate) enum Command {
     },
     /// Allow automatic activation of the nearest project at path (default: cwd)
     Trust { path: Option<PathBuf> },
-    /// Revoke automatic activation of a project
+    /// Revoke automatic activation of a project, even one already deleted
     Untrust { path: Option<PathBuf> },
     /// Show whether the current project is trusted
     Status,
@@ -34,15 +34,23 @@ pub(crate) enum Command {
 pub(crate) fn run(command: &Command) -> Result<()> {
     match command {
         Command::Init { shell } => init(*shell),
-        Command::Trust { path } | Command::Untrust { path } => {
+        Command::Trust { path } => {
             let root = root_at(path.as_deref())?;
-            let trust = matches!(command, Command::Trust { .. });
-            set_trust(&config_dir()?, &root, trust)?;
-            println!(
-                "{}: {}",
-                if trust { "Trusted" } else { "Untrusted" },
-                root.display()
-            );
+            set_trust(&config_dir()?, &root, true)?;
+            println!("Trusted: {}", root.display());
+            Ok(())
+        }
+        Command::Untrust { path } => {
+            let config = config_dir()?;
+            let root = match path {
+                Some(path) => match stored_root(&config, path)? {
+                    Some(root) => root,
+                    None => root_at(Some(path))?,
+                },
+                None => root_at(None)?,
+            };
+            set_trust(&config, &root, false)?;
+            println!("Untrusted: {}", root.display());
             Ok(())
         }
         Command::Status => {
@@ -79,6 +87,21 @@ fn root_at(path: Option<&Path>) -> Result<PathBuf> {
     let root = root.canonicalize()?;
     path_text(&root)?;
     Ok(root)
+}
+
+/// The stored grant an explicit path names, found without a manifest or even
+/// the directory, so a deleted project never leaves a grant that only its
+/// parent's lookup could reach.
+fn stored_root(config: &Path, path: &Path) -> Result<Option<PathBuf>> {
+    let path = env::current_dir()?.join(path);
+    let Some(path) = path
+        .canonicalize()
+        .ok()
+        .or_else(|| resolve_base(&path).ok())
+    else {
+        return Ok(None);
+    };
+    Ok(read_trusted(config)?.contains(&path).then_some(path))
 }
 
 fn config_dir() -> Result<PathBuf> {
