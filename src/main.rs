@@ -26,7 +26,11 @@ enum Command {
     #[command(about = "Initialize the repository")]
     Init,
     #[command(about = "Install the tools")]
-    Install,
+    Install {
+        /// Skip the one-time shell activation question (also BINLOOM_NO_PROMPT=1)
+        #[arg(long)]
+        no_prompt: bool,
+    },
     #[command(about = "Update tools and Binloom")]
     Update {
         /// Tool to update; omit to update all tools and Binloom
@@ -93,7 +97,7 @@ fn main() -> ExitCode {
                 update::update(tool.as_deref())
             }
         }
-        Command::Install => install::install(),
+        Command::Install { no_prompt } => install::install_with_prompt(*no_prompt),
         Command::Exec { command } => exec::exec(command),
         Command::Path => path::path(),
         Command::Env { shell } => env::env(*shell),

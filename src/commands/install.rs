@@ -19,6 +19,11 @@ use std::{
 };
 use tar::{Archive, EntryType};
 
+pub(crate) fn install_with_prompt(no_prompt: bool) -> Result<()> {
+    install()?;
+    super::shell::maybe_prompt(&project_root()?, no_prompt)
+}
+
 pub(crate) fn install() -> Result<()> {
     let root = project_root()?;
     let lock_path = root.join(LOCKFILE);

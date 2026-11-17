@@ -4,7 +4,7 @@ use anyhow::{Context, Result, ensure};
 use clap::Subcommand;
 use std::{
     env, fs,
-    io::{self, Write},
+    io::{self, IsTerminal, Write},
     os::unix::fs::{DirBuilderExt, PermissionsExt},
     path::{Path, PathBuf},
 };
@@ -324,3 +324,288 @@ function _binloom_hook --on-variable PWD
 end
 _binloom_hook
 "#;
+
+struct ActivationSetup<'a> {
+    home: &'a Path,
+    config: &'a Path,
+    shell: Shell,
+    root: &'a Path,
+    executable: &'a Path,
+}
+
+pub(super) fn maybe_prompt(root: &Path, no_prompt: bool) -> Result<()> {
+    if no_prompt
+        || env::var("BINLOOM_NO_PROMPT").as_deref() == Ok("1")
+        || !io::stdin().is_terminal()
+        || !io::stderr().is_terminal()
+        || env::var("BINLOOM_SHELL_HOOK").as_deref() == Ok("1")
+    {
+        return Ok(());
+    }
+    let shell = env::var_os("SHELL").map(PathBuf::from);
+    let shell = match shell
+        .as_deref()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+    {
+        Some("bash") => Shell::Bash,
+        Some("zsh") => Shell::Zsh,
+        Some("fish") => Shell::Fish,
+        _ => return Ok(()),
+    };
+    let home = PathBuf::from(env::var_os("HOME").context("HOME is not set")?);
+    let config = config_dir()?;
+    let executable = env::current_exe()?;
+    prompt_setup(
+        &mut io::stdin().lock(),
+        &mut io::stderr().lock(),
+        &ActivationSetup {
+            home: &home,
+            config: &config,
+            shell,
+            root,
+            executable: &executable,
+        },
+    )
+    .context(
+        "shell activation setup failed; installed tools are still available through binloom exec",
+    )
+}
+
+const BLOCK_BEGIN: &str = "# >>> binloom shell activation >>>";
+const BLOCK_END: &str = "# <<< binloom shell activation <<<";
+
+fn profile_path(home: &Path, shell: Shell) -> Result<PathBuf> {
+    ensure!(home.is_absolute(), "HOME must be absolute");
+    let mut path = home.canonicalize().context("cannot resolve HOME")?;
+    let relative = match shell {
+        Shell::Bash => ".bashrc",
+        Shell::Zsh => ".zshrc",
+        Shell::Fish => ".config/fish/config.fish",
+    };
+    // Reject symlink redirects at every level, before reading or creating files.
+    for component in Path::new(relative).components() {
+        path.push(component);
+        reject_symlink(&path)?;
+    }
+    Ok(path)
+}
+
+fn rc_block(shell: Shell, executable: &Path) -> Result<String> {
+    let fallback = shell.quote(path_text(executable)?);
+    let name = shell.name();
+    let body = match shell {
+        Shell::Bash | Shell::Zsh => format!(
+            "if command -v binloom >/dev/null 2>&1; then\n    eval \"$(binloom shell init --shell {name})\"\nelif [ -x {fallback} ]; then\n    eval \"$({fallback} shell init --shell {name})\"\nfi"
+        ),
+        Shell::Fish => format!(
+            "if command -q binloom\n    binloom shell init --shell fish | source\nelse if test -x {fallback}\n    {fallback} shell init --shell fish | source\nend"
+        ),
+    };
+    Ok(format!("{BLOCK_BEGIN}\n{body}\n{BLOCK_END}\n"))
+}
+
+fn append_rc(path: &Path, existing: &str, block: &str) -> Result<()> {
+    let parent = path.parent().context("rc path has no parent")?;
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(parent)?;
+    let metadata = fs::metadata(path).ok();
+    if metadata.is_some() {
+        let backup = path.with_extension("binloom.bak");
+        reject_symlink(&backup)?;
+        if !backup.try_exists()? {
+            let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+            temporary.write_all(existing.as_bytes())?;
+            temporary.as_file().sync_all()?;
+            temporary
+                .persist_noclobber(&backup)
+                .map_err(|error| error.error)?;
+        }
+    }
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    if let Some(metadata) = metadata {
+        temporary
+            .as_file()
+            .set_permissions(metadata.permissions())?;
+    }
+    temporary.write_all(existing.as_bytes())?;
+    if !existing.is_empty() && !existing.ends_with('\n') {
+        writeln!(temporary)?;
+    }
+    temporary.write_all(block.as_bytes())?;
+    temporary.as_file().sync_all()?;
+    temporary.persist(path).map_err(|error| error.error)?;
+    Ok(())
+}
+
+fn prompt_setup(
+    input: &mut impl io::BufRead,
+    output: &mut impl Write,
+    setup: &ActivationSetup<'_>,
+) -> Result<()> {
+    reject_symlink(setup.config)?;
+    let marker = setup.config.join("activation-prompt");
+    if !read_optional(&marker)?.is_empty() {
+        return Ok(());
+    }
+    let rc = profile_path(setup.home, setup.shell)?;
+    let existing = read_optional(&rc)?;
+    if existing.contains(BLOCK_BEGIN) {
+        ensure!(
+            existing.contains(BLOCK_END),
+            "incomplete Binloom rc block in {}",
+            rc.display()
+        );
+        return Ok(());
+    }
+    write!(
+        output,
+        "Enable automatic project-local commands in your shell? [y/N]"
+    )?;
+    output.flush()?;
+    let mut answer = String::new();
+    input.read_line(&mut answer)?;
+    writeln!(output)?;
+    prepare_config(setup.config)?;
+    if !answer.trim().eq_ignore_ascii_case("y") {
+        return write_private(&marker, "no\n");
+    }
+    let root = setup.root.canonicalize()?;
+    ensure!(
+        root.join(MANIFEST).is_file(),
+        "binloom.toml not found in project"
+    );
+    let block = rc_block(setup.shell, setup.executable)?;
+    set_trust(setup.config, &root, true)?;
+    append_rc(&rc, &existing, &block)?;
+    write_private(&marker, "yes\n")?;
+    writeln!(
+        output,
+        "Shell activation configured in {}. Open a new shell or source that file. Remove the marked Binloom block to disable it.",
+        rc.display()
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn consent_yes_preserves_rc_backs_it_up_trusts_and_appends_once() {
+        for shell in [Shell::Bash, Shell::Zsh, Shell::Fish] {
+            let home = tempfile::tempdir().unwrap();
+            let home = home.path().canonicalize().unwrap();
+            let root = home.join("project ' special");
+            fs::create_dir(&root).unwrap();
+            fs::write(root.join(MANIFEST), "").unwrap();
+            let config = home.join(".config/binloom");
+            let rc = home.join(match shell {
+                Shell::Bash => ".bashrc",
+                Shell::Zsh => ".zshrc",
+                Shell::Fish => ".config/fish/config.fish",
+            });
+            fs::create_dir_all(rc.parent().unwrap()).unwrap();
+            fs::write(&rc, "# keep my config\n").unwrap();
+            let setup = ActivationSetup {
+                home: &home,
+                config: &config,
+                shell,
+                root: &root,
+                executable: Path::new("/cached/binloom"),
+            };
+            let mut output = Vec::new();
+            prompt_setup(&mut Cursor::new(b"y\n"), &mut output, &setup).unwrap();
+            let prompt = String::from_utf8(output).unwrap();
+            assert!(
+                prompt.starts_with("Enable automatic project-local commands in your shell? [y/N]")
+            );
+            let content = fs::read_to_string(&rc).unwrap();
+            assert!(content.starts_with("# keep my config\n"));
+            assert_eq!(
+                content
+                    .matches("# >>> binloom shell activation >>>")
+                    .count(),
+                1
+            );
+            assert!(content.contains(&format!("shell init --shell {}", shell.name())));
+            assert_eq!(
+                fs::read_to_string(rc.with_extension("binloom.bak")).unwrap(),
+                "# keep my config\n"
+            );
+            assert_eq!(
+                fs::read_to_string(config.join("activation-prompt")).unwrap(),
+                "yes\n"
+            );
+            assert_eq!(read_trusted(&config).unwrap(), [root.clone()]);
+            let mut second = Vec::new();
+            prompt_setup(&mut Cursor::new(b"y\n"), &mut second, &setup).unwrap();
+            assert!(second.is_empty());
+            assert_eq!(fs::read_to_string(rc).unwrap(), content);
+        }
+    }
+
+    #[test]
+    fn consent_defaults_to_no_and_remembers_it() {
+        for answer in ["", "\n", "n\n"] {
+            let home = tempfile::tempdir().unwrap();
+            let config = home.path().join(".config/binloom");
+            let setup = ActivationSetup {
+                home: home.path(),
+                config: &config,
+                shell: Shell::Bash,
+                root: home.path(),
+                executable: Path::new("/cached/binloom"),
+            };
+            let mut output = Vec::new();
+            prompt_setup(&mut Cursor::new(answer), &mut output, &setup).unwrap();
+            assert!(!home.path().join(".bashrc").exists());
+            assert!(!config.join("trusted").exists());
+            assert_eq!(
+                fs::read_to_string(config.join("activation-prompt")).unwrap(),
+                "no\n"
+            );
+            output.clear();
+            prompt_setup(&mut Cursor::new(b"y\n"), &mut output, &setup).unwrap();
+            assert!(output.is_empty());
+        }
+    }
+
+    #[test]
+    fn consent_rejects_rc_symlinks_and_symlinked_fish_parent() {
+        for shell in [Shell::Bash, Shell::Fish] {
+            let home = tempfile::tempdir().unwrap();
+            let outside = tempfile::tempdir().unwrap();
+            let config = home.path().join(".config/binloom");
+            if matches!(shell, Shell::Bash) {
+                fs::write(outside.path().join("rc"), "untouched").unwrap();
+                std::os::unix::fs::symlink(outside.path().join("rc"), home.path().join(".bashrc"))
+                    .unwrap();
+            } else {
+                fs::create_dir(home.path().join(".config")).unwrap();
+                std::os::unix::fs::symlink(outside.path(), home.path().join(".config/fish"))
+                    .unwrap();
+            }
+            let setup = ActivationSetup {
+                home: home.path(),
+                config: &config,
+                shell,
+                root: home.path(),
+                executable: Path::new("/cached/binloom"),
+            };
+            assert!(prompt_setup(&mut Cursor::new(b"y\n"), &mut Vec::new(), &setup).is_err());
+            assert!(!config.join("activation-prompt").exists());
+            if matches!(shell, Shell::Bash) {
+                assert_eq!(
+                    fs::read_to_string(outside.path().join("rc")).unwrap(),
+                    "untouched"
+                );
+            } else {
+                assert!(!outside.path().join("config.fish").exists());
+            }
+        }
+    }
+}
