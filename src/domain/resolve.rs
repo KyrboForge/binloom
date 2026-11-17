@@ -225,7 +225,7 @@ fn resolve_binloom_release(
         &mut checksum_cache,
     )?;
     for artifact in binloom.artifacts.values() {
-        if matches!(artifact.format, ArtifactFormat::TarGz) {
+        if !matches!(artifact.format, ArtifactFormat::Raw | ArtifactFormat::Gz) {
             bail!(
                 "unsupported Binloom bootstrap asset: {}; binloomw supports only raw and gz",
                 artifact.asset
@@ -295,7 +295,9 @@ mod tests {
         let source = Source::try_from("github:KyrboForge/binloom".to_owned()).unwrap();
         let client = download::client();
 
-        for suffix in ["", ".gz", ".tar.gz", ".tgz"] {
+        for suffix in [
+            "", ".gz", ".tar.gz", ".tgz", ".tar.xz", ".zip", ".tar.zst", ".tar.bz2",
+        ] {
             let mut assets: Vec<_> = Platform::ALL
                 .iter()
                 .map(|platform| asset(&format!("binloom-{platform}{suffix}")))
@@ -324,7 +326,7 @@ mod tests {
             .unwrap();
 
             let result = resolve_binloom_release(&source, &release, 0, &client);
-            if matches!(suffix, ".tar.gz" | ".tgz") {
+            if !matches!(suffix, "" | ".gz") {
                 let error = result.unwrap_err().to_string();
                 assert!(
                     error.contains("unsupported Binloom bootstrap asset"),

@@ -70,6 +70,10 @@ pub(crate) enum ArtifactFormat {
     Raw,
     Gz,
     TarGz,
+    TarXz,
+    Zip,
+    TarZst,
+    TarBz2,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -211,17 +215,25 @@ impl TryFrom<&str> for ArtifactFormat {
                 .is_some_and(|ending| ending.eq_ignore_ascii_case(suffix))
         };
 
-        if [".zip", ".tar.xz", ".tar.zst"]
+        if ends_with(".tar.gz") || ends_with(".tgz") {
+            Ok(Self::TarGz)
+        } else if ends_with(".tar.xz") {
+            Ok(Self::TarXz)
+        } else if ends_with(".zip") {
+            Ok(Self::Zip)
+        } else if ends_with(".tar.zst") {
+            Ok(Self::TarZst)
+        } else if ends_with(".tar.bz2") {
+            Ok(Self::TarBz2)
+        } else if ends_with(".gz") {
+            Ok(Self::Gz)
+        } else if [".tar", ".xz", ".zst", ".bz2", ".7z", ".rar"]
             .iter()
             .any(|suffix| ends_with(suffix))
         {
-            bail!("unsupported asset format: {asset}");
-        }
-
-        if ends_with(".tar.gz") || ends_with(".tgz") {
-            Ok(Self::TarGz)
-        } else if ends_with(".gz") {
-            Ok(Self::Gz)
+            bail!(
+                "unsupported asset format: {asset}; supported formats: raw, .gz, .tar.gz, .tgz, .tar.xz, .zip, .tar.zst, .tar.bz2"
+            );
         } else {
             Ok(Self::Raw)
         }
@@ -474,7 +486,27 @@ artifacts = {}
             ArtifactFormat::try_from("tool-darwin-arm64.tgz").unwrap(),
             ArtifactFormat::TarGz
         ));
-        assert!(ArtifactFormat::try_from("tool.ZIP").is_err());
+        for (asset, expected) in [
+            ("tool.ZIP", "zip"),
+            ("tool.TAR.XZ", "tar-xz"),
+            ("tool.TAR.ZST", "tar-zst"),
+            ("tool.TAR.BZ2", "tar-bz2"),
+            ("shellcheck-v0.11.0.darwin.aarch64.tar.xz", "tar-xz"),
+            ("tool.tar.gz", "tar-gz"),
+        ] {
+            let format = ArtifactFormat::try_from(asset).unwrap();
+            let serialized = toml::Value::try_from(format).unwrap();
+            assert_eq!(serialized.as_str(), Some(expected), "{asset}");
+            let decoded: ArtifactFormat = serialized.try_into().unwrap();
+            assert_eq!(format!("{decoded:?}"), format!("{format:?}"));
+        }
+        let error = ArtifactFormat::try_from("tool.7z").unwrap_err().to_string();
+        assert!(error.contains("unsupported asset format: tool.7z"));
+        for format in [
+            "raw", ".gz", ".tar.gz", ".tgz", ".tar.xz", ".zip", ".tar.zst", ".tar.bz2",
+        ] {
+            assert!(error.contains(format), "{error}");
+        }
     }
 
     #[test]
