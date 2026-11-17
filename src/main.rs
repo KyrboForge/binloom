@@ -10,7 +10,7 @@ mod download;
 mod http_fixture;
 
 use clap::{Parser, Subcommand};
-use commands::{add, exec, init, install, list, path, update};
+use commands::{add, env, exec, init, install, list, path, update};
 use std::ffi::OsString;
 use std::process::ExitCode;
 
@@ -45,6 +45,11 @@ enum Command {
     List,
     #[command(about = "Show the path")]
     Path,
+    /// Print shell commands to activate this project's tools
+    Env {
+        #[arg(long, value_enum)]
+        shell: env::Shell,
+    },
     #[command(about = "Add a tool")]
     Add {
         /// Name used as the installed command
@@ -86,6 +91,7 @@ fn main() -> ExitCode {
         Command::Install => install::install(),
         Command::Exec { command } => exec::exec(command),
         Command::Path => path::path(),
+        Command::Env { shell } => env::env(*shell),
         Command::Add {
             name,
             source,
