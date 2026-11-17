@@ -144,13 +144,17 @@ Enable automatic project-local commands in your shell? [y/N]
 
 Answering `y` trusts the current project and appends a marked block to `~/.bashrc`,
 `${ZDOTDIR:-~}/.zshrc`, or `${XDG_CONFIG_HOME:-~/.config}/fish/config.fish`,
-selected from `$SHELL`. Existing contents and permissions are preserved; an existing profile gets a sibling
+selected from `$SHELL`. Bash also configures the first existing login file among
+`~/.bash_profile`, `~/.bash_login`, and `~/.profile`, creating `~/.bash_profile`
+if none exists. The hook initializes only once when both Bash files are read.
+Existing contents and permissions are preserved; an existing profile gets a sibling
 `.binloom.bak` backup before atomic replacement. `HOME`, `ZDOTDIR` and `XDG_CONFIG_HOME`
-are resolved like the shell does; symlinked profile files or directories below them are rejected. The block runs the executable used during setup and does nothing if it is
-missing; no global binary is installed. Bash login shells read `~/.bash_profile`, which must
-source `~/.bashrc` for the hook to load.
-Keep that cached executable available, or regenerate the hook from another
-available Binloom.
+are resolved like the shell does; symlinked profile files or directories below them
+are rejected. Setup copies the executable to `$XDG_CONFIG_HOME/binloom/bin/binloom`
+(default `~/.config/binloom/bin/binloom`) and pins that stable path in the block, so
+moving or deleting the setup project does not break activation. If the copy is
+missing, interactive shells warn; run `./binloomw install` in a Binloom project to
+restore it after previously consenting.
 
 Open a new shell or source the updated profile to enable it. A child process
 cannot change the PATH of the shell that ran `install`. Answering anything other
