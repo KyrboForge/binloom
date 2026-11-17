@@ -40,15 +40,18 @@ impl Release {
             })
             .collect::<Vec<_>>();
 
-        let matches = self
-            .assets
+        // Candidates follow alias declaration order, so the first alias with a
+        // match wins instead of making `amd64` and `x64` ambiguous.
+        let matches = candidates
             .iter()
-            .filter(|asset| {
-                candidates
+            .map(|candidate| {
+                self.assets
                     .iter()
-                    .any(|candidate| asset.name.eq_ignore_ascii_case(candidate))
+                    .filter(|asset| asset.name.eq_ignore_ascii_case(candidate))
+                    .collect::<Vec<_>>()
             })
-            .collect::<Vec<_>>();
+            .find(|matches| !matches.is_empty())
+            .unwrap_or_default();
 
         match matches.as_slice() {
             [asset] => Ok(asset),
@@ -131,12 +134,19 @@ impl Release {
             emitted_warnings,
         );
 
-        let matches = Self::prefer(
-            matches,
-            &format!("architecture alias {}", platform.arch_aliases()[0]),
-            |asset| contains_token(&asset.name, platform.arch_aliases()[0]),
-            emitted_warnings,
-        );
+        // Aliases are ranked in declaration order so `amd64` keeps winning over
+        // the later `x64`/`x86-64` spellings when a release ships several.
+        let matches = platform
+            .arch_aliases()
+            .iter()
+            .fold(matches, |matches, alias| {
+                Self::prefer(
+                    matches,
+                    &format!("architecture alias {alias}"),
+                    |asset| contains_token(&asset.name, alias),
+                    emitted_warnings,
+                )
+            });
 
         let matches = Self::prefer(
             matches,
@@ -439,6 +449,29 @@ mod tests {
                 "{alias}"
             );
         }
+    }
+
+    #[test]
+    fn ranks_architecture_aliases_in_declaration_order() {
+        let release = Release {
+            tag: "v1.0.0".to_owned(),
+            published_at: None,
+            assets: vec![
+                asset("tool-linux-x64"),
+                asset("tool-linux-amd64"),
+                asset("tool-linux-x86-64"),
+            ],
+        };
+
+        let by_pattern = release
+            .find_asset_by_pattern("tool-{os}-{arch}", "1.0.0", Platform::LinuxX86_64)
+            .unwrap();
+        let automatic = release
+            .find_asset("tool", Platform::LinuxX86_64, &mut BTreeSet::new())
+            .unwrap();
+
+        assert_eq!(by_pattern.name, "tool-linux-amd64");
+        assert_eq!(automatic.name, "tool-linux-amd64");
     }
 
     #[test]
