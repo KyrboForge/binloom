@@ -184,10 +184,18 @@ fn ensure_platform_specific_assets(
         "use {os}, {arch} or {target} in the asset pattern so every platform locks its own asset";
 
     for (platform, asset) in selected {
-        let foreign = Platform::ALL.iter().find(|other| {
-            (other.os_aliases() != platform.os_aliases() && other.os_in(&asset.name))
-                || (other.arch_aliases() != platform.arch_aliases() && other.arch_in(&asset.name))
-        });
+        // Report the platform whose OS and architecture both appear in the
+        // name when possible, so a Linux asset is not blamed on macOS.
+        let foreign = Platform::ALL
+            .iter()
+            .filter(|other| {
+                (other.os_aliases() != platform.os_aliases() && other.os_in(&asset.name))
+                    || (other.arch_aliases() != platform.arch_aliases()
+                        && other.arch_in(&asset.name))
+            })
+            .max_by_key(|other| {
+                usize::from(other.os_in(&asset.name)) + usize::from(other.arch_in(&asset.name))
+            });
         if let Some(foreign) = foreign {
             bail!(
                 "asset {} selected for {platform} is named for {foreign}; {HINT}",
@@ -440,6 +448,15 @@ mod tests {
             "{error}"
         );
         assert!(error.contains("{os}, {arch} or {target}"), "{error}");
+
+        let error = resolve_gitleaks(Some("gitleaks_{version}_linux_arm64.tar.gz"))
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("selected for macos-aarch64 is named for linux-aarch64"),
+            "{error}"
+        );
     }
 
     #[test]
