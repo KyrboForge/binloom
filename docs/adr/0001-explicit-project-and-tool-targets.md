@@ -70,7 +70,7 @@ asset-pattern = "example_{version}_{target}.tar.gz"
 asset = "example_1.2.3_x86_64-unknown-linux-gnu.tar.gz"
 url = "https://example.invalid/example.tar.gz"
 sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-format = "tar.gz"
+format = "tar-gz"
 checksum-source = "digest"
 ```
 
