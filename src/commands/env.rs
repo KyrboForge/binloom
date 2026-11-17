@@ -11,6 +11,14 @@ pub(crate) enum Shell {
 }
 
 impl Shell {
+    pub(super) fn name(self) -> &'static str {
+        match self {
+            Self::Bash => "bash",
+            Self::Zsh => "zsh",
+            Self::Fish => "fish",
+        }
+    }
+
     pub(super) fn quote(self, value: &str) -> String {
         let escaped = match self {
             Self::Bash | Self::Zsh => value.replace('\'', "'\\''"),

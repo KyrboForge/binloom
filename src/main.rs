@@ -10,7 +10,7 @@ mod download;
 mod http_fixture;
 
 use clap::{Parser, Subcommand};
-use commands::{add, env, exec, init, install, list, path, update};
+use commands::{add, env, exec, init, install, list, path, shell, update};
 use std::ffi::OsString;
 use std::process::ExitCode;
 
@@ -49,6 +49,11 @@ enum Command {
     Env {
         #[arg(long, value_enum)]
         shell: env::Shell,
+    },
+    /// Configure trusted, directory-scoped shell activation
+    Shell {
+        #[command(subcommand)]
+        command: shell::Command,
     },
     #[command(about = "Add a tool")]
     Add {
@@ -92,6 +97,7 @@ fn main() -> ExitCode {
         Command::Exec { command } => exec::exec(command),
         Command::Path => path::path(),
         Command::Env { shell } => env::env(*shell),
+        Command::Shell { command } => shell::run(command),
         Command::Add {
             name,
             source,
