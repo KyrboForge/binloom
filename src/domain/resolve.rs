@@ -138,11 +138,17 @@ fn resolve_release(
     let version = version_from_tag(&release.tag, request.name)?;
     let mut artifacts = BTreeMap::new();
     let mut emitted_warnings = BTreeSet::new();
+    let mut selected = Vec::with_capacity(Platform::ALL.len());
     for platform in Platform::ALL {
         let asset = match request.asset_pattern {
             Some(pattern) => release.find_asset_by_pattern(pattern, &version, platform)?,
             None => release.find_asset(request.name, platform, &mut emitted_warnings)?,
         };
+        selected.push((platform, asset));
+    }
+    ensure_platform_specific_assets(&selected)?;
+
+    for (platform, asset) in selected {
         let (sha256, checksum_source) = resolve_checksum(client, release, asset, checksum_cache)?;
         artifacts.insert(
             platform.to_string(),
@@ -163,6 +169,52 @@ fn resolve_release(
         sha256: None,
         artifacts,
     })
+}
+
+/// Fail closed when a lock would hand one platform another platform's asset.
+///
+/// An asset is rejected for a platform when its name carries an OS or
+/// architecture token of a different platform, or when the same asset is
+/// locked for several platforms. The one tolerated sharing is a macOS
+/// universal binary: both macOS targets, no architecture token in the name.
+fn ensure_platform_specific_assets(
+    selected: &[(Platform, &release::ReleaseAsset)],
+) -> anyhow::Result<()> {
+    const HINT: &str =
+        "use {os}, {arch} or {target} in the asset pattern so every platform locks its own asset";
+
+    for (platform, asset) in selected {
+        let foreign = Platform::ALL.iter().find(|other| {
+            (other.os_aliases() != platform.os_aliases() && other.os_in(&asset.name))
+                || (other.arch_aliases() != platform.arch_aliases() && other.arch_in(&asset.name))
+        });
+        if let Some(foreign) = foreign {
+            bail!(
+                "asset {} selected for {platform} is named for {foreign}; {HINT}",
+                asset.name
+            );
+        }
+    }
+
+    for (index, (platform, asset)) in selected.iter().enumerate() {
+        for (other, shared) in &selected[index + 1..] {
+            if shared.name != asset.name {
+                continue;
+            }
+            let universal_macos = platform.os_aliases() == other.os_aliases()
+                && platform.os_aliases()[0] == "macos"
+                && !platform.arch_in(&asset.name)
+                && !other.arch_in(&asset.name);
+            if !universal_macos {
+                bail!(
+                    "asset {} is selected for both {platform} and {other}; {HINT}",
+                    asset.name
+                );
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn ensure_minimum_age(
@@ -338,6 +390,115 @@ mod tests {
                 result.unwrap();
             }
         }
+    }
+
+    fn gitleaks_release() -> Release {
+        let checksum = "a".repeat(64);
+        let assets = [
+            "gitleaks_8.30.1_darwin_arm64.tar.gz",
+            "gitleaks_8.30.1_darwin_x64.tar.gz",
+            "gitleaks_8.30.1_linux_arm64.tar.gz",
+            "gitleaks_8.30.1_linux_x64.tar.gz",
+            "gitleaks_8.30.1_windows_x64.zip",
+        ];
+
+        Release {
+            tag: "v8.30.1".to_owned(),
+            published_at: Some("2025-11-01T00:00:00Z".to_owned()),
+            assets: assets
+                .iter()
+                .map(|name| ReleaseAsset {
+                    sha256: Some(checksum.clone()),
+                    ..asset(name)
+                })
+                .collect(),
+        }
+    }
+
+    fn resolve_gitleaks(pattern: Option<&str>) -> anyhow::Result<LockedTool> {
+        resolve_release(
+            ReleaseRequest {
+                name: "gitleaks",
+                source: &Source::try_from("github:gitleaks/gitleaks".to_owned()).unwrap(),
+                asset_pattern: pattern,
+            },
+            &gitleaks_release(),
+            0,
+            &download::client(),
+            &mut BTreeMap::new(),
+        )
+    }
+
+    #[test]
+    fn rejects_single_platform_asset_pattern_for_every_platform() {
+        let error = resolve_gitleaks(Some("gitleaks_{version}_darwin_arm64.tar.gz"))
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("selected for macos-x86_64 is named for macos-aarch64"),
+            "{error}"
+        );
+        assert!(error.contains("{os}, {arch} or {target}"), "{error}");
+    }
+
+    #[test]
+    fn locks_platform_specific_assets_from_pattern_and_auto_matching() {
+        for pattern in [Some("gitleaks_{version}_{os}_{arch}.tar.gz"), None] {
+            let locked = resolve_gitleaks(pattern).unwrap();
+            let names: Vec<_> = locked
+                .artifacts
+                .iter()
+                .map(|(platform, artifact)| (platform.as_str(), artifact.asset.as_str()))
+                .collect();
+
+            assert_eq!(
+                names,
+                [
+                    ("linux-aarch64", "gitleaks_8.30.1_linux_arm64.tar.gz"),
+                    ("linux-x86_64", "gitleaks_8.30.1_linux_x64.tar.gz"),
+                    ("macos-aarch64", "gitleaks_8.30.1_darwin_arm64.tar.gz"),
+                    ("macos-x86_64", "gitleaks_8.30.1_darwin_x64.tar.gz"),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_platform_invariant_asset_shared_by_all_platforms() {
+        let shared = asset("tool-1.0.0.tar.gz");
+        let selected: Vec<_> = Platform::ALL.iter().map(|p| (*p, &shared)).collect();
+
+        let error = ensure_platform_specific_assets(&selected)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("is selected for both"), "{error}");
+    }
+
+    #[test]
+    fn allows_universal_macos_asset_but_not_shared_linux_asset() {
+        let universal = asset("tool-universal-apple-darwin.tar.gz");
+        let linux = asset("tool-linux.tar.gz");
+        let aarch64 = asset("tool-aarch64-unknown-linux-musl.tar.gz");
+        let x86_64 = asset("tool-x86_64-unknown-linux-musl.tar.gz");
+
+        ensure_platform_specific_assets(&[
+            (Platform::MacosAarch64, &universal),
+            (Platform::MacosX86_64, &universal),
+            (Platform::LinuxAarch64, &aarch64),
+            (Platform::LinuxX86_64, &x86_64),
+        ])
+        .unwrap();
+
+        assert!(
+            ensure_platform_specific_assets(&[
+                (Platform::LinuxAarch64, &linux),
+                (Platform::LinuxX86_64, &linux),
+            ])
+            .is_err()
+        );
+        assert!(ensure_platform_specific_assets(&[(Platform::MacosAarch64, &x86_64)]).is_err());
     }
 
     #[test]

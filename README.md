@@ -155,6 +155,12 @@ asset = "example_{version}_{os}_{arch}.gz"
 ```
 
 Binloom tries `v{version}`, `{version}`, and `{tool}-{version}` release tags.
+`{os}` matches `macos`/`darwin` and `linux`; `{arch}` matches `aarch64`/`arm64`
+and `x86_64`/`amd64`/`x64`/`x86-64`. Every platform in the lockfile must
+resolve to its own asset: a pattern that names a single platform, such as
+`example_{version}_darwin_arm64.tar.gz`, or an asset that is shared across
+platforms is rejected instead of locking the wrong binary for other targets.
+The only accepted sharing is one macOS universal binary for both macOS targets.
 `{target}` expands to Binloom's portable target for each platform. For example,
 cargo-nextest can use its prebuilt releases without requiring Rust:
 
