@@ -144,8 +144,12 @@ GitLab projects may use nested groups. `GITLAB_TOKEN` optionally authenticates
 GitLab API requests through the `PRIVATE-TOKEN` header. Public repositories are
 supported; private asset downloads are not.
 
-GitHub and GitLab sources use prebuilt release assets. When automatic matching
-is ambiguous, an optional pattern can select one asset for each platform:
+GitHub and GitLab sources use prebuilt release assets. Automatic matching keeps
+assets that name the tool, the OS, and the architecture, then prefers a plain
+name, a single-file `.gz`, and a raw executable over a `.tar.gz`/`.tgz` archive
+that might not contain the tool binary; every dropped candidate is reported as
+a warning. When that is still ambiguous, an optional pattern can select one
+asset for each platform:
 
 ```toml
 [tools.example]

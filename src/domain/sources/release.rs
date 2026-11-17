@@ -1,4 +1,5 @@
 use crate::common::warn;
+use crate::domain::lockfile::ArtifactFormat;
 use crate::domain::platform::{Platform, contains_token};
 use crate::download;
 use crate::download::Client;
@@ -17,6 +18,66 @@ pub(crate) struct ReleaseAsset {
     pub(crate) name: String,
     pub(crate) download_url: String,
     pub(crate) sha256: Option<String>,
+}
+
+/// Signatures, checksums, attestations and OS packages ship next to binaries
+/// but never install as one; `ArtifactFormat` would otherwise read them as raw.
+/// A trailing `.gz` is ignored so compressed sidecars never pass as gzip binaries.
+fn is_sidecar_or_package(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    let name = name.strip_suffix(".gz").unwrap_or(&name);
+    [
+        ".asc",
+        ".sig",
+        ".minisig",
+        ".sigstore",
+        ".bundle",
+        ".pem",
+        ".crt",
+        ".cert",
+        ".pub",
+        ".md5",
+        ".md5sum",
+        ".b3",
+        ".sbom",
+        ".spdx",
+        ".json",
+        ".jsonl",
+        ".txt",
+        ".deb",
+        ".rpm",
+        ".apk",
+        ".pkg",
+        ".dmg",
+        ".msi",
+    ]
+    .iter()
+    .any(|suffix| name.ends_with(suffix))
+        || is_sha_digest(name)
+}
+
+/// Matches every SHA checksum spelling (`.sha384`, `.sha3-256`, `.sha512sum`)
+/// so a digest size missing from a list never passes as a raw binary.
+fn is_sha_digest(name: &str) -> bool {
+    name.rsplit_once('.')
+        .and_then(|(_, extension)| extension.strip_prefix("sha"))
+        .map(|rest| rest.strip_suffix("sum").unwrap_or(rest))
+        .is_some_and(|rest| {
+            !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit() || c == '-')
+        })
+}
+
+/// Archives are every format that is neither a raw executable nor a
+/// single-file gzip, so new archive formats rank below raw binaries unchanged.
+fn is_archive(name: &str) -> bool {
+    !matches!(
+        ArtifactFormat::try_from(name),
+        Ok(ArtifactFormat::Raw | ArtifactFormat::Gz)
+    )
+}
+
+fn is_single_file_gzip(name: &str) -> bool {
+    matches!(ArtifactFormat::try_from(name), Ok(ArtifactFormat::Gz))
 }
 
 impl Release {
@@ -83,34 +144,42 @@ impl Release {
             .iter()
             .filter(|asset| {
                 let name = asset.name.to_lowercase();
-                let is_metadata = [".sha256", ".sha256sum", ".sig", ".minisig"]
-                    .iter()
-                    .any(|suffix| name.ends_with(suffix));
-                let is_package = [".deb", ".rpm", ".apk", ".pkg", ".dmg", ".msi"]
-                    .iter()
-                    .any(|suffix| name.ends_with(suffix));
 
-                !is_metadata
-                    && !is_package
+                !is_sidecar_or_package(&name)
                     && name.contains(&tool_name)
                     && platform.os_in(&name)
                     && platform.arch_in(&name)
             })
             .collect();
+
+        // Formats the installer cannot unpack must not win the later
+        // preferences over an installable `.tar.gz`.
+        let matches = Self::prefer(
+            matches,
+            "supported asset format",
+            |asset| ArtifactFormat::try_from(asset.name.as_str()).is_ok(),
+            emitted_warnings,
+        );
+        // Variants are dropped before the gzip shortcut and alias preferences,
+        // so a lone `-fips.gz` never beats a plain archive and aliases only
+        // break ties among equally plain names.
+        let matches = Self::prefer(
+            matches,
+            "plain asset name",
+            |asset| self.is_plain_name(&asset.name, &tool_name, platform),
+            emitted_warnings,
+        );
         let gzip_matches = matches
             .iter()
             .copied()
-            .filter(|asset| {
-                let name = asset.name.to_ascii_lowercase();
-                name.ends_with(".gz") || name.ends_with(".tgz")
-            })
+            .filter(|asset| is_single_file_gzip(&asset.name))
             .collect::<Vec<_>>();
 
         let matches = if gzip_matches.len() == 1 {
             Self::warn_dropped(
                 &matches,
                 &gzip_matches,
-                "the only gzip candidate",
+                "the only single-file gzip candidate",
                 emitted_warnings,
             );
             gzip_matches
@@ -118,12 +187,14 @@ impl Release {
             matches
         };
 
-        // Variants are dropped before alias preferences so aliases only break
-        // ties among equally plain names.
+        // A raw executable always installs; an archive may not contain a
+        // file named after the tool (yq ships `yq_linux_amd64` plus man pages).
+        // It runs before alias preferences so an `amd64` raw binary is not
+        // dropped in favour of an `x86_64` archive.
         let matches = Self::prefer(
             matches,
-            "plain asset name",
-            |asset| self.is_plain_name(&asset.name, &tool_name, platform),
+            "directly installable asset over an archive",
+            |asset| !is_archive(&asset.name),
             emitted_warnings,
         );
 
@@ -150,10 +221,21 @@ impl Release {
 
         let matches = Self::prefer(
             matches,
-            "gzip format",
+            "single-file gzip format",
+            |asset| is_single_file_gzip(&asset.name),
+            emitted_warnings,
+        );
+
+        // Releases often ship one archive in several compressions; `.tar.gz`
+        // is the long-standing choice, so the others never make it ambiguous.
+        let matches = Self::prefer(
+            matches,
+            "tar.gz over other archive formats",
             |asset| {
-                let name = asset.name.to_ascii_lowercase();
-                name.ends_with(".gz") || name.ends_with(".tgz")
+                matches!(
+                    ArtifactFormat::try_from(asset.name.as_str()),
+                    Ok(ArtifactFormat::Raw | ArtifactFormat::Gz | ArtifactFormat::TarGz)
+                )
             },
             emitted_warnings,
         );
@@ -305,12 +387,23 @@ impl Release {
 
         name.split(|character: char| !character.is_ascii_alphanumeric())
             .all(|token| {
-                matches!(token, "" | "tar" | "gz" | "tgz")
-                    || token
-                        .strip_prefix('v')
-                        .unwrap_or(token)
-                        .chars()
-                        .all(|character| character.is_ascii_digit())
+                matches!(
+                    token,
+                    "" | "tar"
+                        | "gz"
+                        | "tgz"
+                        | "xz"
+                        | "txz"
+                        | "zip"
+                        | "zst"
+                        | "zstd"
+                        | "bz2"
+                        | "tbz2"
+                ) || token
+                    .strip_prefix('v')
+                    .unwrap_or(token)
+                    .chars()
+                    .all(|character| character.is_ascii_digit())
             })
     }
 
@@ -664,7 +757,7 @@ mod tests {
     }
 
     #[test]
-    fn prefers_tgz_over_raw_asset_in_both_preference_passes() {
+    fn prefers_raw_asset_over_tar_archive_but_single_file_gzip_over_both() {
         for other_gzip in [false, true] {
             let mut release = Release {
                 tag: "v1.0.0".to_owned(),
@@ -679,7 +772,257 @@ mod tests {
                 .find_asset("tool", Platform::MacosAarch64, &mut BTreeSet::new())
                 .unwrap();
 
-            assert_eq!(matched.name, "tool-macos-arm64.tgz");
+            let expected = if other_gzip {
+                "tool-darwin-arm64.gz"
+            } else {
+                "tool-macos-arm64"
+            };
+            assert_eq!(matched.name, expected);
+        }
+    }
+
+    #[test]
+    fn selects_yq_raw_binary_over_tar_archive_for_every_platform() {
+        let release = Release {
+            tag: "v4.54.3".to_owned(),
+            published_at: None,
+            assets: vec![
+                asset("checksums"),
+                asset("checksums-bsd"),
+                asset("checksums_hashes_order"),
+                asset("extract-checksum.sh"),
+                asset("yq_darwin_amd64"),
+                asset("yq_darwin_amd64.tar.gz"),
+                asset("yq_darwin_arm64"),
+                asset("yq_darwin_arm64.tar.gz"),
+                asset("yq_freebsd_amd64"),
+                asset("yq_freebsd_amd64.tar.gz"),
+                asset("yq_linux_386"),
+                asset("yq_linux_386.tar.gz"),
+                asset("yq_linux_amd64"),
+                asset("yq_linux_amd64.tar.gz"),
+                asset("yq_linux_arm64"),
+                asset("yq_linux_arm64.tar.gz"),
+                asset("yq_linux_mips"),
+                asset("yq_man_page_only.tar.gz"),
+                asset("yq_windows_amd64.exe"),
+                asset("yq_windows_amd64.zip"),
+            ],
+        };
+        let expected = [
+            (Platform::MacosAarch64, "yq_darwin_arm64"),
+            (Platform::MacosX86_64, "yq_darwin_amd64"),
+            (Platform::LinuxAarch64, "yq_linux_arm64"),
+            (Platform::LinuxX86_64, "yq_linux_amd64"),
+        ];
+
+        for (platform, name) in expected {
+            let mut emitted_warnings = BTreeSet::new();
+            let matched = release
+                .find_asset("yq", platform, &mut emitted_warnings)
+                .unwrap();
+
+            assert_eq!(matched.name, name);
+            assert!(
+                emitted_warnings
+                    .iter()
+                    .any(|warning| warning.contains("over an archive")
+                        && warning.contains(&format!("{name}.tar.gz"))),
+                "{emitted_warnings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn still_selects_archive_only_releases() {
+        let release = Release {
+            tag: "v0.11.0".to_owned(),
+            published_at: None,
+            assets: vec![
+                asset("shellcheck-v0.11.0.darwin.aarch64.tar.gz"),
+                asset("shellcheck-v0.11.0.linux.x86_64.tar.gz"),
+            ],
+        };
+
+        let matched = release
+            .find_asset("shellcheck", Platform::LinuxX86_64, &mut BTreeSet::new())
+            .unwrap();
+
+        assert_eq!(matched.name, "shellcheck-v0.11.0.linux.x86_64.tar.gz");
+    }
+
+    fn sidecars_for(name: &str) -> Vec<ReleaseAsset> {
+        [
+            ".asc",
+            ".sig",
+            ".minisig",
+            ".sha256",
+            ".sha384",
+            ".sha3-256",
+            ".sha512",
+            ".sha512sum",
+            ".pem",
+            ".md5sum",
+            ".sha1sum",
+            ".sbom.json",
+            ".sbom.json.gz",
+            ".intoto.jsonl",
+        ]
+        .iter()
+        .map(|suffix| asset(&format!("{name}{suffix}")))
+        .collect()
+    }
+
+    #[test]
+    fn never_selects_any_sha_checksum_over_a_variant_archive() {
+        for suffix in [".sha224", ".sha384", ".sha384sum", ".sha3-256"] {
+            let release = Release {
+                tag: "v1.0.0".to_owned(),
+                published_at: None,
+                assets: vec![
+                    asset("tool-linux-amd64-musl.tar.gz"),
+                    asset(&format!("tool-linux-amd64-musl{suffix}")),
+                ],
+            };
+
+            let matched = release
+                .find_asset("tool", Platform::LinuxX86_64, &mut BTreeSet::new())
+                .unwrap();
+
+            assert_eq!(matched.name, "tool-linux-amd64-musl.tar.gz", "{suffix}");
+        }
+    }
+
+    #[test]
+    fn never_selects_sidecars_in_mixed_raw_archive_releases() {
+        let cases: [(&[&str], &str); 4] = [
+            (&["tool-linux-amd64.tar.gz"], "tool-linux-amd64.tar.gz"),
+            (
+                &["tool-linux-amd64", "tool-linux-amd64.tar.gz"],
+                "tool-linux-amd64",
+            ),
+            (
+                &["tool-linux-amd64.gz", "tool-linux-amd64.tar.gz"],
+                "tool-linux-amd64.gz",
+            ),
+            (&["tool-linux-amd64.tgz"], "tool-linux-amd64.tgz"),
+        ];
+
+        for (installables, expected) in cases {
+            let mut assets = vec![asset("checksums.txt"), asset("SHA512SUMS.asc")];
+            for name in installables {
+                assets.push(asset(name));
+                assets.extend(sidecars_for(name));
+            }
+            let release = Release {
+                tag: "v1.0.0".to_owned(),
+                published_at: None,
+                assets,
+            };
+
+            let matched = release
+                .find_asset("tool", Platform::LinuxX86_64, &mut BTreeSet::new())
+                .unwrap();
+
+            assert_eq!(matched.name, expected, "{installables:?}");
+        }
+    }
+
+    #[test]
+    fn prefers_plain_archive_over_lone_gzip_variant() {
+        let release = Release {
+            tag: "v1.0.0".to_owned(),
+            published_at: None,
+            assets: vec![
+                asset("tool-linux-amd64.tar.gz"),
+                asset("tool-fips-linux-amd64.gz"),
+            ],
+        };
+
+        let matched = release
+            .find_asset("tool", Platform::LinuxX86_64, &mut BTreeSet::new())
+            .unwrap();
+
+        assert_eq!(matched.name, "tool-linux-amd64.tar.gz");
+    }
+
+    #[test]
+    fn never_installs_unsupported_tar_compressions_next_to_tar_gz() {
+        let release = Release {
+            tag: "v1.0.0".to_owned(),
+            published_at: None,
+            assets: vec![
+                asset("tool-x86_64-unknown-linux-musl.tar.bz2"),
+                asset("tool-x86_64-unknown-linux-musl.tar.lz4"),
+                asset("tool-x86_64-unknown-linux-musl.tar.gz"),
+            ],
+        };
+
+        let matched = release
+            .find_asset("tool", Platform::LinuxX86_64, &mut BTreeSet::new())
+            .unwrap();
+
+        assert_eq!(matched.name, "tool-x86_64-unknown-linux-musl.tar.gz");
+    }
+
+    #[test]
+    fn rejects_releases_with_only_sidecars_for_the_platform() {
+        let release = Release {
+            tag: "v1.0.0".to_owned(),
+            published_at: None,
+            assets: sidecars_for("tool-linux-amd64"),
+        };
+
+        let error = release
+            .find_asset("tool", Platform::LinuxX86_64, &mut BTreeSet::new())
+            .unwrap_err();
+
+        assert!(error.to_string().starts_with("no release asset matched"));
+    }
+
+    #[test]
+    fn ranks_every_archive_suffix_below_raw_binaries() {
+        for suffix in [
+            ".tar.gz",
+            ".tgz",
+            ".tar.xz",
+            ".txz",
+            ".zip",
+            ".tar.zst",
+            ".tar.zstd",
+            ".tar.bz2",
+            ".tbz2",
+        ] {
+            let name = format!("tool-linux-amd64{suffix}");
+            assert!(is_archive(&name), "{name}");
+            assert!(!is_single_file_gzip(&name), "{name}");
+        }
+        assert!(!is_archive("tool-linux-amd64"));
+        assert!(!is_archive("tool-linux-amd64.gz"));
+        assert!(is_single_file_gzip("tool-linux-amd64.GZ"));
+    }
+
+    #[test]
+    fn prefers_supported_tar_gz_over_unsupported_zip_and_tar_xz() {
+        let release = Release {
+            tag: "v1.0.0".to_owned(),
+            published_at: None,
+            assets: vec![
+                asset("tool-x86_64-unknown-linux-musl.zip"),
+                asset("tool-x86_64-unknown-linux-musl.tar.xz"),
+                asset("tool-x86_64-unknown-linux-musl.tar.gz"),
+            ],
+        };
+        let mut warnings = BTreeSet::new();
+
+        let matched = release
+            .find_asset("tool", Platform::LinuxX86_64, &mut warnings)
+            .unwrap();
+
+        // Holds whether the other formats are unsupported or merely ranked lower.
+        assert_eq!(matched.name, "tool-x86_64-unknown-linux-musl.tar.gz");
+        for dropped in ["musl.zip", "musl.tar.xz"] {
+            assert!(warnings.iter().any(|w| w.contains(dropped)), "{warnings:?}");
         }
     }
 
@@ -821,5 +1164,20 @@ mod tests {
         }
 
         assert_eq!(emitted_warnings.len(), 1);
+    }
+
+    #[test]
+    fn prefers_raw_binary_over_archive_with_preferred_alias() {
+        let release = Release {
+            tag: "v1.0.0".to_owned(),
+            published_at: None,
+            assets: vec![asset("tool-linux-amd64"), asset("tool-linux-x86_64.tar.gz")],
+        };
+
+        let matched = release
+            .find_asset("tool", Platform::LinuxX86_64, &mut BTreeSet::new())
+            .unwrap();
+
+        assert_eq!(matched.name, "tool-linux-amd64");
     }
 }
