@@ -49,8 +49,12 @@ pub(super) fn install_from(root: &Path, client: &download::Client) -> Result<()>
 
     manifest.ensure_matches_lockfile(&lockfile)?;
 
+    // Case-insensitive filesystems would alias `.tools/.bin/Binloom` to the manager link.
     ensure!(
-        !lockfile.tools.contains_key("binloom"),
+        !lockfile
+            .tools
+            .keys()
+            .any(|name| name.eq_ignore_ascii_case("binloom")),
         "tool name binloom is reserved for the project-locked Binloom binary"
     );
     ensure!(

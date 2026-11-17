@@ -77,13 +77,19 @@ fn install_does_not_link_a_missing_locked_binary() {
 
 #[test]
 fn install_rejects_reserved_binloom_tool_without_overwriting_it() {
+    for name in ["binloom", "Binloom"] {
+        install_rejects_reserved_tool(name);
+    }
+}
+
+fn install_rejects_reserved_tool(name: &str) {
     let home = tempfile::tempdir().unwrap();
     project(home.path());
     for file in ["binloom.toml", "binloom.lock"] {
         let path = home.path().join(file);
         let contents = fs::read_to_string(&path)
             .unwrap()
-            .replace("tools.tool", "tools.binloom");
+            .replace("tools.tool", &format!("tools.{name}"));
         fs::write(path, contents).unwrap();
     }
     fs::create_dir_all(home.path().join(".tools/.bin")).unwrap();
