@@ -184,24 +184,27 @@ fn ensure_platform_specific_assets(
         "use {os}, {arch} or {target} in the asset pattern so every platform locks its own asset";
 
     for (platform, asset) in selected {
-        // Report the platform whose OS and architecture both appear in the
-        // name when possible, so a Linux asset is not blamed on macOS.
-        let foreign = Platform::ALL
+        let foreign_os = Platform::ALL
             .iter()
-            .filter(|other| {
-                (other.os_aliases() != platform.os_aliases() && other.os_in(&asset.name))
-                    || (other.arch_aliases() != platform.arch_aliases()
-                        && other.arch_in(&asset.name))
-            })
-            .max_by_key(|other| {
-                usize::from(other.os_in(&asset.name)) + usize::from(other.arch_in(&asset.name))
-            });
-        if let Some(foreign) = foreign {
-            bail!(
-                "asset {} selected for {platform} is named for {foreign}; {HINT}",
-                asset.name
-            );
-        }
+            .any(|other| other.os_aliases() != platform.os_aliases() && other.os_in(&asset.name));
+        let foreign_arch = Platform::ALL.iter().any(|other| {
+            other.arch_aliases() != platform.arch_aliases() && other.arch_in(&asset.name)
+        });
+        // Name a whole platform only when both its OS and architecture appear
+        // in the name, so a Linux asset is never blamed on macOS.
+        let foreign = Platform::ALL.iter().find(|other| {
+            other != &platform && other.os_in(&asset.name) && other.arch_in(&asset.name)
+        });
+        let reason = match (foreign, foreign_os, foreign_arch) {
+            (Some(foreign), _, _) => format!("is named for {foreign}"),
+            (None, true, _) => "names a different OS".to_owned(),
+            (None, false, true) => "names a different architecture".to_owned(),
+            (None, false, false) => continue,
+        };
+        bail!(
+            "asset {} selected for {platform} {reason}; {HINT}",
+            asset.name
+        );
     }
 
     for (index, (platform, asset)) in selected.iter().enumerate() {
@@ -457,6 +460,31 @@ mod tests {
             error.contains("selected for macos-aarch64 is named for linux-aarch64"),
             "{error}"
         );
+
+        // A Linux x64 asset is blamed on linux-x86_64, never on macos-x86_64.
+        let error = resolve_gitleaks(Some("gitleaks_{version}_linux_x64.tar.gz"))
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("selected for macos-aarch64 is named for linux-x86_64"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn names_only_the_conflicting_dimension_without_a_full_platform_match() {
+        let linux = asset("tool-linux-armv7.tar.gz");
+        let error = ensure_platform_specific_assets(&[(Platform::MacosAarch64, &linux)])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("names a different OS"), "{error}");
+
+        let x64 = asset("tool-freebsd-x64.tar.gz");
+        let error = ensure_platform_specific_assets(&[(Platform::MacosAarch64, &x64)])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("names a different architecture"), "{error}");
     }
 
     #[test]
