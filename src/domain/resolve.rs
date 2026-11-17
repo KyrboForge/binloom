@@ -149,7 +149,7 @@ fn resolve_release(
         };
         selected.push((platform, asset));
     }
-    ensure_platform_specific_assets(&selected)?;
+    ensure_platform_specific_assets(request.name, &version, &selected)?;
 
     for (platform, asset) in selected {
         let (sha256, checksum_source) = resolve_checksum(client, release, asset, checksum_cache)?;
@@ -180,23 +180,36 @@ fn resolve_release(
 /// architecture token of a different platform, or when the same asset is
 /// locked for several platforms. The one tolerated sharing is a macOS
 /// universal binary: both macOS targets, no architecture token in the name.
+/// Platform tokens are read with the tool name and version blanked out, so a
+/// tool called `linux-tool` can still lock a macOS asset.
 fn ensure_platform_specific_assets(
+    name: &str,
+    version: &str,
     selected: &[(Platform, &release::ReleaseAsset)],
 ) -> anyhow::Result<()> {
     const HINT: &str =
         "use {os}, {arch} or {target} in the asset pattern so every platform locks its own asset";
+    let platform_part = |asset: &release::ReleaseAsset| {
+        [name, version]
+            .iter()
+            .filter(|part| !part.is_empty())
+            .fold(asset.name.to_ascii_lowercase(), |rest, part| {
+                blank_token(&rest, &part.to_ascii_lowercase())
+            })
+    };
 
     for (platform, asset) in selected {
-        let foreign_os = Platform::ALL
-            .iter()
-            .any(|other| other.os_aliases() != platform.os_aliases() && other.os_in(&asset.name));
+        let platform_part = platform_part(asset);
+        let foreign_os = Platform::ALL.iter().any(|other| {
+            other.os_aliases() != platform.os_aliases() && other.os_in(&platform_part)
+        });
         let foreign_arch = Platform::ALL.iter().any(|other| {
-            other.arch_aliases() != platform.arch_aliases() && other.arch_in(&asset.name)
+            other.arch_aliases() != platform.arch_aliases() && other.arch_in(&platform_part)
         });
         // Name a whole platform only when both its OS and architecture appear
         // in the name, so a Linux asset is never blamed on macOS.
         let foreign = Platform::ALL.iter().find(|other| {
-            other != &platform && other.os_in(&asset.name) && other.arch_in(&asset.name)
+            other != &platform && other.os_in(&platform_part) && other.arch_in(&platform_part)
         });
         let reason = match (foreign, foreign_os, foreign_arch) {
             (Some(foreign), _, _) => format!("is named for {foreign}"),
@@ -217,8 +230,8 @@ fn ensure_platform_specific_assets(
             }
             let universal_macos = platform.os_aliases() == other.os_aliases()
                 && platform.os_aliases()[0] == "macos"
-                && !platform.arch_in(&asset.name)
-                && !other.arch_in(&asset.name);
+                && !platform.arch_in(&platform_part(asset))
+                && !other.arch_in(&platform_part(asset));
             if !universal_macos {
                 bail!(
                     "asset {} is selected for both {platform} and {other}; {HINT}",
@@ -229,6 +242,28 @@ fn ensure_platform_specific_assets(
     }
 
     Ok(())
+}
+
+/// Replaces `token` with `-` wherever it is not glued to ASCII alphanumerics,
+/// so a tool named `x` never blanks the `x` out of `x86_64`.
+fn blank_token(name: &str, token: &str) -> String {
+    let bytes = name.as_bytes();
+    let mut blanked = String::with_capacity(name.len());
+    let mut copied = 0;
+    for (start, _) in name.match_indices(token) {
+        let end = start + token.len();
+        let before = start.checked_sub(1).map(|index| bytes[index]);
+        let after = bytes.get(end).copied();
+        if !before.is_some_and(|byte| byte.is_ascii_alphanumeric())
+            && !after.is_some_and(|byte| byte.is_ascii_alphanumeric())
+        {
+            blanked.push_str(&name[copied..start]);
+            blanked.push('-');
+            copied = end;
+        }
+    }
+    blanked.push_str(&name[copied..]);
+    blanked
 }
 
 fn ensure_minimum_age(
@@ -526,17 +561,34 @@ mod tests {
     }
 
     #[test]
+    fn ignores_platform_words_in_the_tool_name_and_version() {
+        let macos = asset("linux-tool-1.0.0-macos-arm64.gz");
+
+        ensure_platform_specific_assets("linux-tool", "1.0.0", &[(Platform::MacosAarch64, &macos)])
+            .unwrap();
+
+        // Only whole tokens are blanked: a tool named `x` keeps `x86_64` visible.
+        let linux = asset("x-1.0.0-linux-x86_64.tar.gz");
+        assert!(
+            ensure_platform_specific_assets("x", "1.0.0", &[(Platform::MacosAarch64, &linux)])
+                .is_err()
+        );
+    }
+
+    #[test]
     fn names_only_the_conflicting_dimension_without_a_full_platform_match() {
         let linux = asset("tool-linux-armv7.tar.gz");
-        let error = ensure_platform_specific_assets(&[(Platform::MacosAarch64, &linux)])
-            .unwrap_err()
-            .to_string();
+        let error =
+            ensure_platform_specific_assets("tool", "1.0.0", &[(Platform::MacosAarch64, &linux)])
+                .unwrap_err()
+                .to_string();
         assert!(error.contains("names a different OS"), "{error}");
 
         let x64 = asset("tool-freebsd-x64.tar.gz");
-        let error = ensure_platform_specific_assets(&[(Platform::MacosAarch64, &x64)])
-            .unwrap_err()
-            .to_string();
+        let error =
+            ensure_platform_specific_assets("tool", "1.0.0", &[(Platform::MacosAarch64, &x64)])
+                .unwrap_err()
+                .to_string();
         assert!(error.contains("names a different architecture"), "{error}");
     }
 
@@ -567,7 +619,7 @@ mod tests {
         let shared = asset("tool-1.0.0.tar.gz");
         let selected: Vec<_> = Platform::ALL.iter().map(|p| (*p, &shared)).collect();
 
-        let error = ensure_platform_specific_assets(&selected)
+        let error = ensure_platform_specific_assets("tool", "1.0.0", &selected)
             .unwrap_err()
             .to_string();
 
@@ -581,22 +633,33 @@ mod tests {
         let aarch64 = asset("tool-aarch64-unknown-linux-musl.tar.gz");
         let x86_64 = asset("tool-x86_64-unknown-linux-musl.tar.gz");
 
-        ensure_platform_specific_assets(&[
-            (Platform::MacosAarch64, &universal),
-            (Platform::MacosX86_64, &universal),
-            (Platform::LinuxAarch64, &aarch64),
-            (Platform::LinuxX86_64, &x86_64),
-        ])
+        ensure_platform_specific_assets(
+            "tool",
+            "1.0.0",
+            &[
+                (Platform::MacosAarch64, &universal),
+                (Platform::MacosX86_64, &universal),
+                (Platform::LinuxAarch64, &aarch64),
+                (Platform::LinuxX86_64, &x86_64),
+            ],
+        )
         .unwrap();
 
         assert!(
-            ensure_platform_specific_assets(&[
-                (Platform::LinuxAarch64, &linux),
-                (Platform::LinuxX86_64, &linux),
-            ])
+            ensure_platform_specific_assets(
+                "tool",
+                "1.0.0",
+                &[
+                    (Platform::LinuxAarch64, &linux),
+                    (Platform::LinuxX86_64, &linux),
+                ]
+            )
             .is_err()
         );
-        assert!(ensure_platform_specific_assets(&[(Platform::MacosAarch64, &x86_64)]).is_err());
+        assert!(
+            ensure_platform_specific_assets("tool", "1.0.0", &[(Platform::MacosAarch64, &x86_64)])
+                .is_err()
+        );
     }
 
     #[test]

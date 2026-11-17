@@ -56,12 +56,17 @@ fn is_sidecar_or_package(name: &str) -> bool {
         || is_sha_digest(name)
 }
 
-/// Matches every SHA checksum spelling (`.sha384`, `.sha3-256`, `.sha512sum`)
-/// so a digest size missing from a list never passes as a raw binary.
+/// Matches every SHA checksum spelling (`.sha384`, `.sha3-256`, `.sha512sum`,
+/// `.sha256sums`) so a digest size missing from a list never passes as a raw
+/// binary.
 fn is_sha_digest(name: &str) -> bool {
     name.rsplit_once('.')
         .and_then(|(_, extension)| extension.strip_prefix("sha"))
-        .map(|rest| rest.strip_suffix("sum").unwrap_or(rest))
+        .map(|rest| {
+            rest.strip_suffix("sums")
+                .or_else(|| rest.strip_suffix("sum"))
+                .unwrap_or(rest)
+        })
         .is_some_and(|rest| {
             !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit() || c == '-')
         })
@@ -875,7 +880,13 @@ mod tests {
 
     #[test]
     fn never_selects_any_sha_checksum_over_a_variant_archive() {
-        for suffix in [".sha224", ".sha384", ".sha384sum", ".sha3-256"] {
+        for suffix in [
+            ".sha224",
+            ".sha384",
+            ".sha384sum",
+            ".sha256sums",
+            ".sha3-256",
+        ] {
             let release = Release {
                 tag: "v1.0.0".to_owned(),
                 published_at: None,
