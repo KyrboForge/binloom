@@ -70,6 +70,10 @@ pub(crate) enum ArtifactFormat {
     Raw,
     Gz,
     TarGz,
+    TarXz,
+    Zip,
+    TarZst,
+    TarBz2,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -211,26 +215,30 @@ impl TryFrom<&str> for ArtifactFormat {
                 .is_some_and(|ending| ending.eq_ignore_ascii_case(suffix))
         };
 
-        // Any other `.tar.<compression>` is unsupported, so new compressions
-        // never parse as raw executables.
-        if [
-            ".zip", ".tar", ".xz", ".txz", ".zst", ".zstd", ".bz2", ".tbz2", ".tbz", ".7z", ".rar",
-            ".lz4", ".lz", ".lzma", ".br", ".z",
+        if ends_with(".tar.gz") || ends_with(".tgz") {
+            Ok(Self::TarGz)
+        } else if ends_with(".tar.xz") || ends_with(".txz") {
+            Ok(Self::TarXz)
+        } else if ends_with(".zip") {
+            Ok(Self::Zip)
+        } else if ends_with(".tar.zst") || ends_with(".tar.zstd") {
+            Ok(Self::TarZst)
+        } else if ends_with(".tar.bz2") || ends_with(".tbz2") {
+            Ok(Self::TarBz2)
+        } else if ends_with(".gz") {
+            Ok(Self::Gz)
+        } else if [
+            ".tar", ".xz", ".zst", ".zstd", ".bz2", ".tbz", ".7z", ".rar", ".lz4", ".lz", ".lzma", ".br", ".z",
         ]
         .iter()
         .any(|suffix| ends_with(suffix))
-            || asset
-                .to_ascii_lowercase()
-                .rsplit_once(".tar.")
-                .is_some_and(|(_, compression)| compression != "gz")
+            // Any other `.tar.<compression>` is unsupported, so new compressions
+            // never parse as raw executables.
+            || asset.to_ascii_lowercase().contains(".tar.")
         {
-            bail!("unsupported asset format: {asset}");
-        }
-
-        if ends_with(".tar.gz") || ends_with(".tgz") {
-            Ok(Self::TarGz)
-        } else if ends_with(".gz") {
-            Ok(Self::Gz)
+            bail!(
+                "unsupported asset format: {asset}; supported formats: raw, .gz, .tar.gz, .tgz, .tar.xz, .txz, .zip, .tar.zst, .tar.zstd, .tar.bz2, .tbz2"
+            );
         } else {
             Ok(Self::Raw)
         }
@@ -483,7 +491,24 @@ artifacts = {}
             ArtifactFormat::try_from("tool-darwin-arm64.tgz").unwrap(),
             ArtifactFormat::TarGz
         ));
-        assert!(ArtifactFormat::try_from("tool.ZIP").is_err());
+        for (asset, expected) in [
+            ("tool.ZIP", "zip"),
+            ("tool.TAR.XZ", "tar-xz"),
+            ("tool.TAR.ZST", "tar-zst"),
+            ("tool.TAR.BZ2", "tar-bz2"),
+            ("tool.txz", "tar-xz"),
+            ("tool.tar.zstd", "tar-zst"),
+            ("tool.tbz2", "tar-bz2"),
+            ("shellcheck-v0.11.0.darwin.aarch64.tar.xz", "tar-xz"),
+            ("tool.tar.gz", "tar-gz"),
+        ] {
+            let format = ArtifactFormat::try_from(asset).unwrap();
+            let serialized = toml::Value::try_from(format).unwrap();
+            assert_eq!(serialized.as_str(), Some(expected), "{asset}");
+            let decoded: ArtifactFormat = serialized.try_into().unwrap();
+            assert_eq!(format!("{decoded:?}"), format!("{format:?}"));
+        }
+        assert!(ArtifactFormat::try_from("tool.zstd").is_err());
         for unsupported in [
             "tool.tar.lz4",
             "tool.tbz",
@@ -496,6 +521,23 @@ artifacts = {}
                 ArtifactFormat::try_from(unsupported).is_err(),
                 "{unsupported}"
             );
+        }
+        let error = ArtifactFormat::try_from("tool.7z").unwrap_err().to_string();
+        assert!(error.contains("unsupported asset format: tool.7z"));
+        for format in [
+            "raw",
+            ".gz",
+            ".tar.gz",
+            ".tgz",
+            ".tar.xz",
+            ".txz",
+            ".zip",
+            ".tar.zst",
+            ".tar.zstd",
+            ".tar.bz2",
+            ".tbz2",
+        ] {
+            assert!(error.contains(format), "{error}");
         }
     }
 

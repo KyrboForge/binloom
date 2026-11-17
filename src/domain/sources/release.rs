@@ -1180,4 +1180,38 @@ mod tests {
 
         assert_eq!(matched.name, "tool-linux-amd64");
     }
+
+    #[test]
+    fn prefers_plain_archive_over_variant_in_every_format() {
+        for suffix in [".tar.xz", ".txz", ".zip", ".tar.zst", ".tar.bz2", ".tbz2"] {
+            let plain = format!("tool-linux-amd64{suffix}");
+            let release = Release {
+                tag: "v1.0.0".to_owned(),
+                published_at: None,
+                assets: vec![
+                    asset(&plain),
+                    asset(&format!("tool-fips-linux-amd64{suffix}")),
+                ],
+            };
+
+            let matched = release
+                .find_asset("tool", Platform::LinuxX86_64, &mut BTreeSet::new())
+                .unwrap();
+
+            assert_eq!(matched.name, plain);
+        }
+
+        let release = Release {
+            tag: "v1.0.0".to_owned(),
+            published_at: None,
+            assets: vec![
+                asset("tool-linux-amd64.tar.xz"),
+                asset("tool-fips-linux-amd64.tar.gz"),
+            ],
+        };
+        let matched = release
+            .find_asset("tool", Platform::LinuxX86_64, &mut BTreeSet::new())
+            .unwrap();
+        assert_eq!(matched.name, "tool-linux-amd64.tar.xz");
+    }
 }
