@@ -159,6 +159,8 @@ asset = "example_{version}_{os}_{arch}.gz"
 ```
 
 Binloom tries `v{version}`, `{version}`, and `{tool}-{version}` release tags.
+`binloom add` accepts any of those spellings, such as `--version v4.54.3` or
+`--version jq-1.8.2`, and stores the bare version in `binloom.toml`.
 `{os}` matches `macos`/`darwin` and `linux`; `{arch}` matches `aarch64`/`arm64`
 and `x86_64`/`amd64`/`x64`/`x86-64`. Every platform in the lockfile must
 resolve to its own asset: a pattern that names a single platform, such as

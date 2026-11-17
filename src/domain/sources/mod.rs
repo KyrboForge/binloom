@@ -18,6 +18,17 @@ pub(crate) trait ReleaseProvider {
     fn fetch_latest_release(&self, client: &Client) -> Result<Release>;
 }
 
+/// Strips a `v` or `{name}-` release-tag prefix so `v4.54.3` and `jq-1.8.2`
+/// store the same bare version as `4.54.3` and `1.8.2`; `release_tags`
+/// still tries the prefixed tags when resolving.
+pub(crate) fn bare_version<'a>(name: &str, version: &'a str) -> &'a str {
+    version
+        .strip_prefix('v')
+        .filter(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+        .or_else(|| version.strip_prefix(name)?.strip_prefix('-'))
+        .unwrap_or(version)
+}
+
 fn release_tags(name: &str, version: &str) -> Vec<String> {
     if version.starts_with('v') {
         vec![version.to_owned(), format!("{name}-{version}")]
@@ -116,6 +127,16 @@ mod tests {
     #[test]
     fn builds_release_tags_for_v_prefixed_version() {
         assert_eq!(release_tags("tool", "v1.2.3"), ["v1.2.3", "tool-v1.2.3"]);
+    }
+
+    #[test]
+    fn strips_release_tag_prefixes_from_versions() {
+        assert_eq!(bare_version("yq", "v4.54.3"), "4.54.3");
+        assert_eq!(bare_version("jq", "jq-1.8.2"), "1.8.2");
+        assert_eq!(bare_version("jq", "jq-v1.8.2"), "v1.8.2");
+        assert_eq!(bare_version("yq", "4.54.3"), "4.54.3");
+        assert_eq!(bare_version("tool", "vendor-1.0"), "vendor-1.0");
+        assert_eq!(bare_version("tool", "v"), "v");
     }
 
     #[test]
