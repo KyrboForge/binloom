@@ -1122,3 +1122,184 @@ fn tool_excluding_the_host_fails_without_path_fallback() {
     assert_eq!(fs::read_to_string(root.join("binloom.lock")).unwrap(), lock);
     assert_eq!(server.shutdown(), 0);
 }
+
+#[test]
+fn unsupported_explicit_project_host_leaves_manifest_and_lock_untouched() {
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path();
+    let other = if std::env::consts::OS == "linux" {
+        "macos-aarch64"
+    } else {
+        "linux-x86_64-gnu"
+    };
+    let manifest = format!(
+        "manifest-version = 1\n[binloom]\nversion = '1.0.0'\n[platforms]\ntargets = ['{other}']\n\
+         [tools.{TOOL}]\nversion = '1.0.0'\nsource = 'github:owner/{TOOL}'\n"
+    );
+    let lock = format!(
+        "lock-version = 1\n[platforms]\ntargets = ['{other}']\n\
+         [tools.{TOOL}]\nversion = '1.0.0'\nsource = 'github:owner/{TOOL}'\ntag = 'v1.0.0'\ntargets = ['{other}']\n\
+         [tools.{TOOL}.artifacts.{other}]\nasset = '{TOOL}'\nurl = 'https://example.invalid/tool'\nsha256 = '{}'\nformat = 'raw'\n",
+        checksum(SCRIPT)
+    );
+    fs::write(root.join("binloom.toml"), &manifest).unwrap();
+    fs::write(root.join("binloom.lock"), &lock).unwrap();
+    for args in [&["install"][..], &["exec", TOOL][..]] {
+        let output = cli(root).args(args).output().unwrap();
+        assert!(!output.status.success());
+        assert!(
+            stderr(&output).contains(&format!("this project does not support {}", platform())),
+            "{}",
+            stderr(&output)
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(root.join("binloom.toml")).unwrap(),
+        manifest
+    );
+    assert_eq!(fs::read_to_string(root.join("binloom.lock")).unwrap(), lock);
+    assert!(!root.join(".tools").exists());
+}
+
+#[test]
+fn unsupported_host_cannot_bootstrap_missing_lock() {
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path();
+    let other = if std::env::consts::OS == "linux" {
+        "macos-aarch64"
+    } else {
+        "linux-x86_64-gnu"
+    };
+    let manifest = format!(
+        "manifest-version = 1\n[binloom]\nversion = '1.0.0'\n[platforms]\ntargets = ['{other}']\n"
+    );
+    fs::write(root.join("binloom.toml"), &manifest).unwrap();
+    let output = cli(root).arg("install").output().unwrap();
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("this project does not support"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("binloom.toml")).unwrap(),
+        manifest
+    );
+    assert!(!root.join("binloom.lock").exists());
+    assert!(!root.join(".tools").exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn real_linux_host_installs_and_executes_only_its_pinned_abi() {
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path();
+    let gnu = format!("{}-gnu", platform());
+    let musl = format!("{}-musl", platform());
+    let gnu_script = b"#!/bin/sh\nprintf 'gnu\\n'\n";
+    let musl_script = b"#!/bin/sh\nprintf 'musl\\n'\n";
+    let gnu_server = Server::start(gnu_script, Duration::ZERO);
+    let musl_server = Server::start(musl_script, Duration::ZERO);
+    let manifest = format!(
+        "manifest-version = 1\n[binloom]\nversion = '1.0.0'\n[platforms]\ntargets = ['{gnu}', '{musl}']\n\
+         [tools.{TOOL}]\nversion = '1.0.0'\nsource = 'github:owner/{TOOL}'\n"
+    );
+    let lock_header = format!(
+        "lock-version = 1\n[platforms]\ntargets = ['{gnu}', '{musl}']\n\
+         [tools.{TOOL}]\nversion = '1.0.0'\nsource = 'github:owner/{TOOL}'\ntag = 'v1.0.0'\n"
+    );
+    let artifact = |target: &str, script: &[u8], server: &Server| {
+        format!(
+            "[tools.{TOOL}.artifacts.{target}]\nasset = '{TOOL}-{target}'\nurl = '{}'\nsha256 = '{}'\nformat = 'raw'\n",
+            server.url,
+            checksum(script)
+        )
+    };
+    let gnu_artifact = artifact(&gnu, gnu_script, &gnu_server);
+    let musl_artifact = artifact(&musl, musl_script, &musl_server);
+    let lock = format!("{lock_header}targets = ['{gnu}', '{musl}']\n{gnu_artifact}{musl_artifact}");
+    fs::write(root.join("binloom.toml"), &manifest).unwrap();
+    fs::write(root.join("binloom.lock"), &lock).unwrap();
+    let first = exec_tool(root);
+    if !first.status.success() && stderr(&first).contains("could not determine libc") {
+        eprintln!("runtime libc could not be determined on this Linux host");
+        assert!(!root.join(".tools").exists());
+        assert_eq!(gnu_server.shutdown(), 0);
+        assert_eq!(musl_server.shutdown(), 0);
+        return;
+    }
+    assert!(first.status.success(), "{}", stderr(&first));
+    let (current, other, other_artifact, script, request_counts) = match first.stdout.as_slice() {
+        b"gnu\n" => (&gnu, &musl, &musl_artifact, gnu_script.as_slice(), (1, 0)),
+        b"musl\n" => (&musl, &gnu, &gnu_artifact, musl_script.as_slice(), (0, 1)),
+        stdout => panic!("unexpected output: {:?}", String::from_utf8_lossy(stdout)),
+    };
+    let installed = cli(root).arg("install").output().unwrap();
+    eprintln!("runtime Linux target {current}");
+    assert!(installed.status.success(), "{}", stderr(&installed));
+    assert!(
+        String::from_utf8_lossy(&installed.stdout)
+            .contains(&format!("Already installed {TOOL} 1.0.0"))
+    );
+    assert_eq!(fs::read(version_dir(root).join(TOOL)).unwrap(), script);
+    assert_eq!(
+        fs::read_to_string(root.join("binloom.toml")).unwrap(),
+        manifest
+    );
+    assert_eq!(fs::read_to_string(root.join("binloom.lock")).unwrap(), lock);
+
+    // Narrow the project to its host first without updating the lock.
+    let narrowed = manifest.replace(
+        &format!("targets = ['{gnu}', '{musl}']"),
+        &format!("targets = ['{current}']"),
+    );
+    fs::write(root.join("binloom.toml"), &narrowed).unwrap();
+    for args in [&["install"][..], &["exec", TOOL][..]] {
+        let output = cli(root).args(args).output().unwrap();
+        assert!(!output.status.success());
+        assert!(
+            stderr(&output).contains("out of sync; run `binloom update`"),
+            "{}",
+            stderr(&output)
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(root.join("binloom.toml")).unwrap(),
+        narrowed
+    );
+    assert_eq!(fs::read_to_string(root.join("binloom.lock")).unwrap(), lock);
+
+    // Scope the tool to the other ABI while both remain in the project.
+    let excluding_tool = format!("{manifest}targets = ['{other}']\n");
+    let other_lock = format!("{lock_header}targets = ['{other}']\n{other_artifact}");
+    fs::write(root.join("binloom.toml"), &excluding_tool).unwrap();
+    fs::write(root.join("binloom.lock"), &other_lock).unwrap();
+    let fallback = tempfile::tempdir().unwrap();
+    let impostor = fallback.path().join(TOOL);
+    fs::write(&impostor, SCRIPT).unwrap();
+    fs::set_permissions(impostor, fs::Permissions::from_mode(0o755)).unwrap();
+    let output = cli(root)
+        .env("PATH", fallback.path())
+        .args(["exec", TOOL])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        stderr(&output).contains(&format!("tool {TOOL} is not available on {current}")),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("binloom.toml")).unwrap(),
+        excluding_tool
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("binloom.lock")).unwrap(),
+        other_lock
+    );
+    assert_eq!(
+        (gnu_server.shutdown(), musl_server.shutdown()),
+        request_counts
+    );
+}

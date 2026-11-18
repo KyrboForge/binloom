@@ -195,7 +195,9 @@ mod tests {
                 assert_ne!(fs::read(&lock_path).unwrap(), lockfile);
 
                 // Missing artifacts fail installation before any download.
-                install::install_from(directory.path(), &download::client(), Platform::LinuxX86_64)
+                install::install_from(directory.path(), &download::client(), |_| {
+                    Ok(Platform::LinuxX86_64)
+                })
             },
         )
         .unwrap_err();

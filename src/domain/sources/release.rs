@@ -1,6 +1,7 @@
 use crate::common::warn;
 use crate::domain::lockfile::ArtifactFormat;
-use crate::domain::platform::{Platform, contains_token};
+use crate::domain::platform::{LinuxAbi, Platform, contains_token};
+use crate::domain::sources::bare_version;
 use crate::download;
 use crate::download::Client;
 use anyhow::{Context, bail};
@@ -87,6 +88,122 @@ fn is_single_file_gzip(name: &str) -> bool {
     matches!(ArtifactFormat::try_from(name), Ok(ArtifactFormat::Gz))
 }
 
+/// Ignore the tool name and version when interpreting platform labels.
+pub(crate) fn asset_platform_part(
+    asset: &str,
+    name: &str,
+    version: &str,
+    platform: Platform,
+) -> String {
+    // `v1.0.0` must go before `1.0.0`: the `v` would otherwise glue the bare
+    // version to an alphanumeric and keep it visible.
+    let tagged = if version.is_empty() {
+        String::new()
+    } else {
+        format!("v{version}")
+    };
+    if platform.linux_abi().is_some() {
+        // Remove one version spelling and one tool label. Further occurrences
+        // can be real ABI/architecture tokens and must stay visible.
+        let mut part = asset.to_ascii_lowercase();
+        if !version.is_empty() {
+            let without_tag = blank_token(&part, &tagged.to_ascii_lowercase(), true);
+            part = if without_tag == part {
+                blank_token(&part, &version.to_ascii_lowercase(), true)
+            } else {
+                without_tag
+            };
+        }
+        return if name.is_empty() {
+            part
+        } else {
+            blank_token(&part, &name.to_ascii_lowercase(), true)
+        };
+    }
+    [tagged.as_str(), version, name]
+        .iter()
+        .filter(|part| !part.is_empty())
+        .fold(asset.to_ascii_lowercase(), |rest, part| {
+            blank_token(&rest, &part.to_ascii_lowercase(), false)
+        })
+}
+
+pub(crate) fn foreign_platform_reason(platform: Platform, platform_part: &str) -> Option<String> {
+    // OSes Binloom cannot target yet; naming one never matches any platform.
+    const UNSUPPORTED_OS_ALIASES: [&str; 3] = ["windows", "win32", "win64"];
+    // Likewise for architectures: `armv7` must never be locked as an x86_64 asset.
+    const UNSUPPORTED_ARCH_ALIASES: [&str; 14] = [
+        "arm", "armv5", "armv6", "armv7", "armv7l", "armhf", "i386", "i686", "386", "ppc64",
+        "ppc64le", "s390x", "riscv64", "mips64",
+    ];
+    let foreign_os = Platform::LEGACY_DEFAULT
+        .iter()
+        .any(|other| other.os_aliases() != platform.os_aliases() && other.os_in(platform_part))
+        || UNSUPPORTED_OS_ALIASES
+            .iter()
+            .any(|alias| contains_token(platform_part, alias));
+    let foreign_arch = Platform::LEGACY_DEFAULT.iter().any(|other| {
+        other.arch_aliases() != platform.arch_aliases() && other.arch_in(platform_part)
+    }) || UNSUPPORTED_ARCH_ALIASES
+        .iter()
+        .any(|alias| contains_token(platform_part, alias));
+    // Name a whole platform only when both its OS and architecture appear
+    // in the name, so a Linux asset is never blamed on macOS.
+    let foreign = Platform::LEGACY_DEFAULT.iter().find(|other| {
+        **other != platform.base_platform()
+            && other.os_in(platform_part)
+            && other.arch_in(platform_part)
+    });
+    match (foreign, foreign_os, foreign_arch) {
+        (Some(foreign), _, _) => Some(format!("is named for {foreign}")),
+        (None, true, _) => Some("names a different OS".to_owned()),
+        (None, false, true) => Some("names a different architecture".to_owned()),
+        (None, false, false) => None,
+    }
+}
+
+/// Replaces `token` with `-` wherever it is not glued to ASCII alphanumerics,
+/// so a tool named `x` never blanks the `x` out of `x86_64`.
+fn blank_token(name: &str, token: &str, first_only: bool) -> String {
+    let bytes = name.as_bytes();
+    let mut blanked = String::with_capacity(name.len());
+    let mut copied = 0;
+    for (start, _) in name.match_indices(token) {
+        let end = start + token.len();
+        let before = start.checked_sub(1).map(|index| bytes[index]);
+        let after = bytes.get(end).copied();
+        if !before.is_some_and(|byte| byte.is_ascii_alphanumeric())
+            && !after.is_some_and(|byte| byte.is_ascii_alphanumeric())
+        {
+            blanked.push_str(&name[copied..start]);
+            blanked.push('-');
+            copied = end;
+            if first_only {
+                break;
+            }
+        }
+    }
+    blanked.push_str(&name[copied..]);
+    blanked
+}
+
+pub(crate) fn linux_abi_rejection(
+    platform: Platform,
+    part: &str,
+    require_abi: bool,
+) -> Option<&'static str> {
+    let abi = platform.linux_abi()?;
+    let gnu = contains_token(part, "gnu") || contains_token(part, "glibc");
+    let musl = contains_token(part, "musl");
+    match (gnu, musl, abi) {
+        (true, true, _) => Some("names both GNU/glibc and musl"),
+        (true, false, LinuxAbi::Musl) => Some("names GNU/glibc, but this target requires musl"),
+        (false, true, LinuxAbi::Gnu) => Some("names musl, but this target requires GNU/glibc"),
+        (false, false, _) if require_abi => Some("has no GNU/glibc or musl token"),
+        _ => None,
+    }
+}
+
 impl Release {
     pub(crate) fn find_asset_by_pattern(
         &self,
@@ -103,7 +220,7 @@ impl Release {
                         .replace("{version}", version)
                         .replace("{os}", os)
                         .replace("{arch}", arch)
-                        .replace("{target}", platform.target())
+                        .replace("{target}", platform.rust_target())
                 })
             })
             .collect::<Vec<_>>();
@@ -123,16 +240,36 @@ impl Release {
 
         match matches.as_slice() {
             [asset] => Ok(asset),
+            [] if platform.linux_abi().is_some() => {
+                let mut names: Vec<_> = self
+                    .assets
+                    .iter()
+                    .map(|asset| asset.name.as_str())
+                    .collect();
+                names.sort_unstable();
+                let seen = if names.is_empty() {
+                    "(none)".to_owned()
+                } else {
+                    names.join(", ")
+                };
+                bail!(
+                    "release {} has no asset matching pattern {pattern} for {platform}; candidate assets that did not match: {seen}",
+                    self.tag
+                )
+            }
             [] => bail!(
                 "release {} has no asset matching pattern {pattern} for {platform}",
                 self.tag
             ),
             assets => {
-                let names = assets
+                let mut names = assets
                     .iter()
                     .map(|asset| asset.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                    .collect::<Vec<_>>();
+                if platform.linux_abi().is_some() {
+                    names.sort_unstable();
+                }
+                let names = names.join(", ");
 
                 bail!("multiple release assets matched pattern {pattern} for {platform}: {names}")
             }
@@ -144,20 +281,65 @@ impl Release {
         platform: Platform,
         emitted_warnings: &mut BTreeSet<String>,
     ) -> anyhow::Result<&ReleaseAsset> {
+        let version = bare_version(tool_name, &self.tag);
         let tool_name = tool_name.to_lowercase();
 
-        let matches: Vec<_> = self
-            .assets
-            .iter()
-            .filter(|asset| {
-                let name = asset.name.to_lowercase();
-
-                !is_sidecar_or_package(&name)
-                    && name.contains(&tool_name)
-                    && platform.os_in(&name)
-                    && platform.arch_in(&name)
-            })
-            .collect();
+        let candidates = self.assets.iter().filter_map(|asset| {
+            let name = asset.name.to_lowercase();
+            (!is_sidecar_or_package(&name)).then_some((asset, name))
+        });
+        let matches = if platform.linux_abi().is_some() {
+            let mut matches = Vec::new();
+            let mut rejected = Vec::new();
+            for (asset, name) in candidates {
+                if !name.contains(&tool_name) {
+                    rejected.push(format!(
+                        "{} (name does not contain {tool_name})",
+                        asset.name
+                    ));
+                    continue;
+                }
+                let part = asset_platform_part(&asset.name, &tool_name, version, platform);
+                let reason = foreign_platform_reason(platform, &part)
+                    .or_else(|| {
+                        if !platform.os_in(&part) || !platform.arch_in(&part) {
+                            Some("lacks a Linux OS or matching architecture token".to_owned())
+                        } else {
+                            linux_abi_rejection(platform, &part, true).map(str::to_owned)
+                        }
+                    })
+                    .or_else(|| {
+                        ArtifactFormat::try_from(asset.name.as_str())
+                            .err()
+                            .map(|err| err.to_string())
+                    });
+                if let Some(reason) = reason {
+                    rejected.push(format!("{} ({reason})", asset.name));
+                } else {
+                    matches.push(asset);
+                }
+            }
+            if matches.is_empty() {
+                rejected.sort_unstable();
+                let seen = if rejected.is_empty() {
+                    "(none)".to_owned()
+                } else {
+                    rejected.join(", ")
+                };
+                bail!(
+                    "no release asset matched {tool_name} for {platform}; candidates: {seen}. Choose a release with a compatible asset or set an explicit asset pattern"
+                );
+            }
+            matches.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+            matches
+        } else {
+            candidates
+                .filter_map(|(asset, name)| {
+                    (name.contains(&tool_name) && platform.os_in(&name) && platform.arch_in(&name))
+                        .then_some(asset)
+                })
+                .collect::<Vec<_>>()
+        };
 
         // Formats the installer cannot unpack must not win the later
         // preferences over an installable `.tar.gz`.
@@ -390,6 +572,11 @@ impl Release {
 
         for alias in platform.arch_aliases().iter().chain(platform.os_aliases()) {
             name = name.replace(alias, " ");
+        }
+        if platform.linux_abi().is_some() {
+            for alias in ["gnu", "glibc", "musl", "unknown"] {
+                name = blank_token(&name, alias, false);
+            }
         }
 
         name.split(|character: char| !character.is_ascii_alphanumeric())
@@ -1172,7 +1359,7 @@ mod tests {
 
         let mut emitted_warnings = BTreeSet::new();
 
-        for platform in Platform::ALL {
+        for platform in Platform::LEGACY_DEFAULT {
             release
                 .find_asset("tool", platform, &mut emitted_warnings)
                 .unwrap();

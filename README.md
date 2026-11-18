@@ -115,7 +115,7 @@ archive) on later runs, repairing a modified or non-executable cache and
 failing closed if it cannot. An intact cache works offline. See
 [Cache verification](docs/design.md#cache-verification) for the guarantees and
 limits.
-`binloomw install` installs all declared tools. Both put executables under
+`binloomw install` installs declared tools for the host target. Both put executables under
 `.tools/<tool>/<version>/` and link them into `.tools/.bin`. To use that path
 for a single shell command:
 
@@ -269,7 +269,8 @@ resolve to its own asset: a pattern that names a single platform, such as
 platforms is rejected instead of locking the wrong binary for other targets.
 The only accepted sharing is one macOS universal binary for both macOS targets,
 and its name must say `universal`.
-`{target}` expands to Binloom's portable target for each platform. For example,
+`{target}` expands to a Rust target triple such as
+`x86_64-unknown-linux-gnu`. For example,
 cargo-nextest can use its prebuilt releases without requiring Rust:
 
 ```toml
@@ -310,32 +311,61 @@ minimum-release-age-minutes = 1440
 
 ### Platform targets
 
-By default every tool is locked for `macos-aarch64`, `macos-x86_64`,
-`linux-aarch64`, and `linux-x86_64`. A project can declare the platforms it
-supports instead, and narrow individual tools to a subset of them:
+Without `[platforms]`, tools are locked for the four legacy targets
+`macos-aarch64`, `macos-x86_64`, `linux-aarch64`, and `linux-x86_64`.
+The legacy Linux IDs match by OS and architecture alone and still expand
+`{target}` to a musl triple. They retain that meaning in manifests and locks.
+
+Projects can also declare `linux-aarch64-gnu`, `linux-aarch64-musl`,
+`linux-x86_64-gnu`, and `linux-x86_64-musl`. Tools inherit the project
+targets and can narrow them to a subset.
 
 ```toml
 [platforms]
-targets = ["macos-aarch64", "linux-x86_64"]
+targets = ["linux-x86_64-gnu", "linux-x86_64-musl"]
 
 [tools.example]
 version = "1.2.3"
 source = "github:owner/example"
-targets = ["linux-x86_64"] # defaults to every [platforms] target
+# Inherits both project targets.
+
+[tools.gnu-only]
+version = "1.0.0"
+source = "github:owner/gnu-only"
+targets = ["linux-x86_64-gnu"]
 ```
 
-Only those four ids are accepted; unknown or duplicate ids, an empty list, and
-tool targets outside `[platforms] targets` (or without a `[platforms]` table)
-are rejected. Order does not matter. Binloom resolves exactly the declared
-targets, fails if any of them has no matching asset, and records the targets in
-`binloom.lock`. On a project host, `install` skips tools that exclude it and
-`exec` reports that the tool is unavailable instead of falling back to `PATH`.
-On a host outside `[platforms] targets`, `install` fails before changing
-anything. Without `[platforms]`, manifests and locks behave exactly as before.
+Target lists must be nonempty and contain unique supported IDs. Tool targets
+require `[platforms]`. A list cannot mix a legacy Linux ID with an explicit
+ABI for the same architecture. Each required target must resolve to an asset.
+Narrow a tool to the ABI its upstream publishes, or use an explicit asset
+pattern to identify a compatible build whose filename omits the ABI.
+
+For explicit Linux targets, automatic matching requires a standalone `gnu`,
+`glibc`, or `musl` token in the asset name. A generic `linux` asset needs an
+explicit pattern that asserts compatibility. A matching ABI label identifies
+only the libc family. A `musl` suffix does not guarantee static linking. A
+`gnu` suffix declares no minimum glibc version. Neither guarantees that
+required shared libraries are present or that the binary runs on every
+distribution.
+
+On a supported project host, `install` skips tools that exclude the detected
+target. `exec` rejects an excluded tool and names the detected target. An
+unavailable declared tool never falls back to a same-named binary on `PATH`.
+A host outside the project targets fails before installation changes. See
+[Linux target detection](docs/design.md#linux-target-detection).
+
+Both file versions stay at 1. There is no migration command. `install` creates a
+missing lock from the manifest pins. `install` and `exec` leave existing locks
+intact. Run `binloom update` after changing targets or if `exec` needs a missing
+lock.
 
 Binloom releases before target support reject these fields. Upgrade the pinned
 Binloom and its wrapper first (`binloomw update --self`), commit, and only then
-add `[platforms]` and run `binloomw update` to regenerate the lock.
+add `[platforms]` and run `binloomw update` to regenerate the lock. The
+wrapper's own Binloom bootstrap still selects the legacy `linux-*` artifact
+keys and is not ABI-aware; see
+[#38](https://github.com/KyrboForge/binloom/issues/38).
 
 ## 🧰 Commands
 
@@ -343,7 +373,7 @@ add `[platforms]` and run `binloomw update` to regenerate the lock.
 | --- | --- |
 | `binloom init` | Create missing manifest, lock and wrapper files; add `.tools/` to `.gitignore` |
 | `binloom add <name> --source <source> --version <version> [--asset <pattern>]` | Append a tool, refresh the lockfile, and install it |
-| `binloom install` | Install every locked tool; reconstruct the lockfile from manifest pins when it is missing |
+| `binloom install` | Install locked tools compatible with the host target and reconstruct a missing lockfile from manifest pins |
 | `binloom update [tool]` | Update one tool, or all tools and Binloom when omitted |
 | `binloom update --self` | Update only Binloom and its wrapper metadata |
 | `binloom exec <command> [args...]` | Install the requested declared tool on demand and run with `.tools/.bin` prepended to `PATH` |
@@ -402,6 +432,10 @@ rustup run stable cargo llvm-cov --all-targets --locked --summary-only
 
 CI rejects changes that lower line coverage below 60% and uploads the report
 to GitHub Code Quality.
+
+Linux ABI tests simulate x86_64 GNU and musl loader evidence. The real-host
+install and exec test was exercised in aarch64 GNU and musl containers for
+[#37](https://github.com/KyrboForge/binloom/issues/37).
 
 ## 📜 License
 

@@ -137,7 +137,7 @@ impl Manifest {
         tool.targets
             .as_deref()
             .or(self.project_targets())
-            .unwrap_or(&Platform::ALL)
+            .unwrap_or(&Platform::LEGACY_DEFAULT)
     }
 
     pub(crate) fn ensure_matches_lockfile(&self, lockfile: &Lockfile) -> Result<()> {
@@ -454,7 +454,7 @@ version = "../../x"
         let manifest = parse(&format!(
             r#"{HEADER}
 [platforms]
-targets = ["linux-x86_64", "macos-aarch64", "linux-aarch64"]
+targets = ["linux-x86_64-musl", "linux-x86_64-gnu", "macos-aarch64", "linux-aarch64"]
 
 [tools.wide]
 version = "1.0.0"
@@ -463,7 +463,7 @@ source = "github:owner/wide"
 [tools.narrow]
 version = "1.0.0"
 source = "github:owner/narrow"
-targets = ["linux-x86_64", "linux-aarch64"]
+targets = ["linux-x86_64-musl", "linux-aarch64"]
 "#
         ))
         .unwrap();
@@ -471,27 +471,35 @@ targets = ["linux-x86_64", "linux-aarch64"]
         let project = [
             Platform::MacosAarch64,
             Platform::LinuxAarch64,
-            Platform::LinuxX86_64,
+            Platform::LinuxX86_64Gnu,
+            Platform::LinuxX86_64Musl,
         ];
         assert_eq!(manifest.project_targets(), Some(&project[..]));
         assert_eq!(manifest.tool_targets(&manifest.tools["wide"]), project);
         assert_eq!(
             manifest.tool_targets(&manifest.tools["narrow"]),
-            [Platform::LinuxAarch64, Platform::LinuxX86_64]
+            [Platform::LinuxAarch64, Platform::LinuxX86_64Musl]
         );
     }
 
     #[test]
-    fn legacy_manifest_targets_every_platform() {
-        let manifest = parse(&format!(
+    fn legacy_manifest_targets_the_original_four_platforms() {
+        let content = format!(
             "{HEADER}\n[tools.tool]\nversion = \"1.0.0\"\nsource = \"github:owner/tool\"\n"
-        ))
-        .unwrap();
+        );
+        let manifest = parse(&content).unwrap();
 
         assert_eq!(manifest.project_targets(), None);
         assert_eq!(
             manifest.tool_targets(&manifest.tools["tool"]),
-            Platform::ALL
+            Platform::LEGACY_DEFAULT
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("binloom.toml");
+        fs::write(&path, &content).unwrap();
+        assert_eq!(
+            render_versions(&path, None, std::iter::empty()).unwrap(),
+            content
         );
     }
 
@@ -505,8 +513,8 @@ targets = ["linux-x86_64", "linux-aarch64"]
                 "unknown target `windows-x86_64`",
             ),
             (
-                "[platforms]\ntargets = [\"linux-x86_64-musl\"]\n",
-                "unknown target `linux-x86_64-musl`",
+                "[platforms]\ntargets = [\"linux-x86_64\", \"linux-x86_64-musl\"]\n",
+                "cannot mix legacy target `linux-x86_64` with `linux-x86_64-musl`",
             ),
             (
                 "[platforms]\ntargets = [\"linux-x86_64\", \"linux-x86_64\"]\n",

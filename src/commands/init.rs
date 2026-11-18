@@ -109,7 +109,7 @@ fn generate_binloomw(path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{add_to_gitignore, generate_binloomw, generate_manifest, init_at};
-    use crate::domain::platform::Platform;
+    use crate::domain::platform::{Host, Platform};
     use sha2::{Digest, Sha256};
     use std::os::unix::fs::PermissionsExt;
     use std::{fs, io, process::Command};
@@ -226,7 +226,7 @@ printf 'fake binloom: %s\n' "$*"
 
         let checksum = checksum(fake_binary);
 
-        let platform = Platform::current().unwrap();
+        let platform = Host::current_target(&Platform::LEGACY_DEFAULT).unwrap();
 
         let lock = || {
             fs::write(
@@ -362,7 +362,7 @@ sha256 = "{checksum}"
     fn wrapper_rejects_unsafe_locked_binloom_version() {
         let directory = tempfile::tempdir().unwrap();
         let wrapper = directory.path().join("binloomw");
-        let platform = Platform::current().unwrap();
+        let platform = Host::current_target(&Platform::LEGACY_DEFAULT).unwrap();
 
         generate_binloomw(&wrapper).unwrap();
 
