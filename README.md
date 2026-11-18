@@ -355,10 +355,10 @@ unavailable declared tool never falls back to a same-named binary on `PATH`.
 A host outside the project targets fails before installation changes. See
 [Linux target detection](docs/design.md#linux-target-detection).
 
-Both file versions stay at 1. There is no migration command. `install` and
-`exec` leave existing locks intact and direct you to `binloom update` when a
-required lock is missing or stale. Run `binloom update` after changing
-targets.
+Both file versions stay at 1. There is no migration command. `install` creates a
+missing lock from the manifest pins. `install` and `exec` leave existing locks
+intact. Run `binloom update` after changing targets or if `exec` needs a missing
+lock.
 
 Binloom releases before target support reject these fields. Upgrade the pinned
 Binloom and its wrapper first (`binloomw update --self`), commit, and only then
@@ -373,7 +373,7 @@ keys and is not ABI-aware; see
 | --- | --- |
 | `binloom init` | Create missing manifest, lock and wrapper files; add `.tools/` to `.gitignore` |
 | `binloom add <name> --source <source> --version <version> [--asset <pattern>]` | Append a tool, refresh the lockfile, and install it |
-| `binloom install` | Install locked tools compatible with the host target |
+| `binloom install` | Install locked tools compatible with the host target and reconstruct a missing lockfile from manifest pins |
 | `binloom update [tool]` | Update one tool, or all tools and Binloom when omitted |
 | `binloom update --self` | Update only Binloom and its wrapper metadata |
 | `binloom exec <command> [args...]` | Install the requested declared tool on demand and run with `.tools/.bin` prepended to `PATH` |

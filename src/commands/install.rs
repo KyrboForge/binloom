@@ -37,8 +37,25 @@ pub(crate) fn install_with_prompt(no_prompt: bool) -> Result<()> {
 
 pub(crate) fn install() -> Result<()> {
     let root = project_root()?;
+    install_with_lock(&root, super::update::lock)
+}
+
+fn install_with_lock(root: &Path, create_lock: impl FnOnce() -> Result<()>) -> Result<()> {
+    if !root
+        .join(LOCKFILE)
+        .try_exists()
+        .context("failed to check binloom.lock")?
+    {
+        let manifest = Manifest::try_from(root.join(MANIFEST).as_path())?;
+        Host::current_target(
+            manifest
+                .project_targets()
+                .unwrap_or(&Platform::LEGACY_DEFAULT),
+        )?;
+        create_lock()?;
+    }
     let client = download::client();
-    install_from(&root, &client, Host::current_target)
+    install_from(root, &client, Host::current_target)
 }
 
 /// True when a locked tool is available on `host`; legacy entries cover every platform.
@@ -982,6 +999,13 @@ mod tests {
     }
 
     fn write_project(root: &Path, url: &str, sha256: &str) {
+        write_legacy_manifest(root);
+        legacy_lock(url, sha256)
+            .write(&root.join(LOCKFILE))
+            .unwrap();
+    }
+
+    fn write_legacy_manifest(root: &Path) {
         fs::write(
             root.join("binloom.toml"),
             r#"manifest-version = 1
@@ -995,7 +1019,9 @@ source = "github:owner/tool"
 "#,
         )
         .unwrap();
+    }
 
+    fn legacy_lock(url: &str, sha256: &str) -> Lockfile {
         let platform = Host::current_target(&Platform::LEGACY_DEFAULT)
             .unwrap()
             .to_string();
@@ -1022,7 +1048,7 @@ source = "github:owner/tool"
             },
         );
 
-        lockfile.write(root.join("binloom.lock").as_path()).unwrap();
+        lockfile
     }
 
     #[test]
@@ -1453,7 +1479,7 @@ source = "github:owner/tool"
     }
 
     #[test]
-    fn installs_tool_from_http() {
+    fn installs_legacy_project_with_missing_lock() {
         let directory = tempfile::tempdir().unwrap();
         let binary = b"new tool";
         let server = Server::start(vec![Response {
@@ -1461,15 +1487,14 @@ source = "github:owner/tool"
             body: binary.to_vec(),
         }]);
 
-        write_project(
-            directory.path(),
-            &format!("{}/tool", server.url()),
-            &checksum(binary),
-        );
+        let root = directory.path();
+        let lock_path = root.join(LOCKFILE);
+        write_legacy_manifest(root);
+        let lockfile = legacy_lock(&format!("{}/tool", server.url()), &checksum(binary));
+        assert!(!lock_path.exists());
 
-        let client = download::client();
-
-        install_from(directory.path(), &client, Host::current_target).unwrap();
+        install_with_lock(root, || lockfile.write_new(&lock_path)).unwrap();
+        assert!(lock_path.is_file());
 
         let installed = directory.path().join(".tools/tool/1.0.0/tool");
 

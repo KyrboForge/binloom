@@ -1162,15 +1162,22 @@ fn unsupported_explicit_project_host_leaves_manifest_and_lock_untouched() {
 }
 
 #[test]
-fn install_with_missing_lock_requires_update_and_does_not_write_metadata() {
+fn unsupported_host_cannot_bootstrap_missing_lock() {
     let project = tempfile::tempdir().unwrap();
     let root = project.path();
-    let manifest = "manifest-version = 1\n[binloom]\nversion = '1.0.0'\n";
-    fs::write(root.join("binloom.toml"), manifest).unwrap();
+    let other = if std::env::consts::OS == "linux" {
+        "macos-aarch64"
+    } else {
+        "linux-x86_64-gnu"
+    };
+    let manifest = format!(
+        "manifest-version = 1\n[binloom]\nversion = '1.0.0'\n[platforms]\ntargets = ['{other}']\n"
+    );
+    fs::write(root.join("binloom.toml"), &manifest).unwrap();
     let output = cli(root).arg("install").output().unwrap();
     assert!(!output.status.success());
     assert!(
-        stderr(&output).contains("run `binloom update`"),
+        stderr(&output).contains("this project does not support"),
         "{}",
         stderr(&output)
     );

@@ -288,8 +288,8 @@ binloom path
 - `init` creates only missing files and never overwrites project files.
 - `add` appends one exact tool requirement, rebuilds the lockfile at those
   requested versions, and installs the tools.
-- `install` consumes an existing lockfile. A missing lockfile directs the
-  user to `binloom update`.
+- `install` uses the existing lockfile or reconstructs a missing one from
+  manifest pins after checking host support.
 - `update <tool>` selects that tool's latest stable release and preserves the
   other locked entries.
 - `update` without a name updates every tool, Binloom, and wrapper metadata.
