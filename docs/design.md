@@ -342,7 +342,10 @@ Known limits:
 
 - Hashing and `execve` are separate steps. A process running as the same user
   that rewrites the executable in place after hashing is not excluded; closing
-  that needs sealing (`memfd`/`fexecve`) or supervision.
+  that needs sealing (`memfd`/`fexecve`) or supervision. The same applies to two
+  `binloomw` wrappers whose lockfiles name different artifacts for one Binloom
+  version: they share one `.tools/binloom/<version>/` path, so one run can end up
+  executing the other's verified bytes.
 - Anyone who can rewrite both the executable and the lockfile controls what runs;
   the lockfile is trusted repository state.
 - `bootstrap.sh` has no cache and fetches `SHA256SUMS` from the same release

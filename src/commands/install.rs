@@ -104,6 +104,17 @@ pub(super) fn install_from(root: &Path, client: &download::Client) -> Result<()>
     if let Some(binloom) = &lockfile.binloom {
         let directory = root.join(TOOLS_DIR).join("binloom").join(&binloom.version);
         let cached = directory.join("binloom");
+        // Verification may chmod the executable, so never walk through a symlinked component.
+        for path in [
+            directory.parent().and_then(Path::parent),
+            directory.parent(),
+            Some(&directory),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            check_cache_type(path, fs::Metadata::is_dir)?;
+        }
         let matches = match binloom.artifacts.get(&platform_key) {
             // The POSIX wrapper writes the Binloom bootstrap cache; its marker alone is not
             // trusted, so the executable is verified like any other locked artifact.

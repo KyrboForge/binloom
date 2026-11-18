@@ -179,15 +179,17 @@ format = "raw"
     assert!(!root.join(".tools").join(OTHER_TOOL).exists());
 }
 
-const UTILITIES: [&str; 18] = [
+const UTILITIES: [&str; 20] = [
     "awk",
     "cat",
     "chmod",
     "cp",
     "curl",
     "dirname",
+    "find",
     "gzip",
     "head",
+    "id",
     "mkdir",
     "mktemp",
     "mv",
@@ -618,6 +620,25 @@ fn executable_modes_are_respected_or_repaired() {
     assert_ran(&output, "good");
     assert!(requests.is_empty());
     assert_eq!(mode(), 0o755);
+}
+
+#[test]
+fn writable_cached_executable_is_replaced_not_run() {
+    let fx = Fixture::new();
+    let artifact = Artifact::new("good", "raw");
+    fx.install("1.0.0", &artifact);
+    let exe = fx.dir("1.0.0").join("binloom");
+    fs::set_permissions(&exe, fs::Permissions::from_mode(0o777)).unwrap();
+    let (output, _) = fx.run_offline();
+    assert_refused(&output, "good");
+
+    let (output, requests) = fx.run(&artifact.body);
+    assert_ran(&output, "good");
+    assert_eq!(requests, ["/binloom"]);
+    assert_eq!(
+        fs::metadata(&exe).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
 }
 
 #[test]

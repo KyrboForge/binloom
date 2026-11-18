@@ -281,3 +281,35 @@ fn install_links_a_gz_binloom_only_while_its_retained_archive_verifies() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("binloomw install"));
     assert!(link.symlink_metadata().is_err());
 }
+
+#[test]
+fn install_refuses_a_symlinked_binloom_directory_without_touching_its_target() {
+    let home = tempfile::tempdir().unwrap();
+    project(home.path());
+    let external = home.path().join("external");
+    fs::rename(home.path().join(".tools/binloom"), &external).unwrap();
+    let target = external.join("1.0.0/binloom");
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).unwrap();
+    std::os::unix::fs::symlink(&external, home.path().join(".tools/binloom")).unwrap();
+
+    let output = install(home.path());
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("symlink"));
+    assert_eq!(
+        fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+        0o644
+    );
+    assert!(!home.path().join(".tools/.bin/binloom").exists());
+}
+
+#[test]
+fn install_skips_linking_a_group_writable_binloom() {
+    let home = tempfile::tempdir().unwrap();
+    project(home.path());
+    let executable = home.path().join(".tools/binloom/1.0.0/binloom");
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o775)).unwrap();
+    let output = install(home.path());
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("binloomw install"));
+    assert!(!home.path().join(".tools/.bin/binloom").exists());
+}

@@ -185,7 +185,11 @@ MAX_DECOMPRESSED_BYTES=536870912
 # Concurrency: there is no lock (flock is not portable to macOS). Concurrent
 # wrappers, and a concurrent `binloom install`, are safe because every publish
 # is an atomic rename of fully verified content and every cache hit is
-# re-verified, so the worst case is a redundant reinstall.
+# re-verified, so the worst case is a redundant reinstall. Known limit: a writer
+# of the same user can still replace the executable between verification and
+# exec (also two wrappers whose locks name different artifacts for one version);
+# closing that needs supervision or digest-addressed paths, which this layout
+# does not have.
 
 fail() {
     echo "error: $*" >&2
@@ -226,8 +230,15 @@ gz_sha256() {
     gzip -dc "$1" | head -c $((MAX_DECOMPRESSED_BYTES + 1)) | sha256_file -
 }
 
+# Mirrors the Rust verifier: an executable owned by someone else (root excepted)
+# or writable by group/others is replaced instead of run.
+owned_and_private() {
+    [ -n "$(find "$1" \( -user "$(id -u)" -o -user 0 \) ! -perm -022 2>/dev/null)" ]
+}
+
 cache_valid() {
     [ -f "$BINLOOM" ] && [ -f "$CHECKSUM_STAMP" ] && [ -f "$EXECUTABLE_STAMP" ] || return 1
+    owned_and_private "$BINLOOM" || return 1
     [ "$(cat "$CHECKSUM_STAMP")" = "$SHA256" ] || return 1
     exe_sha256=$(sha256_file "$BINLOOM" 2>/dev/null) || return 1
     [ "$(cat "$EXECUTABLE_STAMP")" = "$exe_sha256" ] || return 1
@@ -304,11 +315,13 @@ verify_file "$ARCHIVE" "$SHA256" "Binloom"
 
 case "$FORMAT" in
     gz)
-        gzip -t "$ARCHIVE" || fail "Binloom archive is not a valid gzip stream"
+        # Capped extraction first so an oversized archive stops at the cap; the
+        # full-stream integrity test only runs on streams that fit.
         gzip -dc "$ARCHIVE" | head -c $((MAX_DECOMPRESSED_BYTES + 1)) > "$BINARY_TMP"
         if [ "$(wc -c < "$BINARY_TMP")" -gt "$MAX_DECOMPRESSED_BYTES" ]; then
             fail "Binloom archive expands beyond $MAX_DECOMPRESSED_BYTES bytes"
         fi
+        gzip -t "$ARCHIVE" || fail "Binloom archive is not a valid gzip stream"
         ;;
     raw)
         cp "$ARCHIVE" "$BINARY_TMP"
