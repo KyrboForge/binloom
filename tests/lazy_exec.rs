@@ -1066,3 +1066,59 @@ fn replaced_install_lock_is_never_shared() {
     }
     assert_eq!(server.shutdown(), 1);
 }
+
+#[test]
+fn tool_excluding_the_host_fails_without_path_fallback() {
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path();
+    let server = Server::start(SCRIPT, Duration::ZERO);
+    let host = platform();
+    let other = if host.starts_with("linux") {
+        "macos-aarch64"
+    } else {
+        "linux-x86_64"
+    };
+    let sha = checksum(SCRIPT);
+    let url = &server.url;
+    fs::write(
+        root.join("binloom.toml"),
+        format!(
+            "manifest-version = 1\n[binloom]\nversion = '1.0.0'\n[platforms]\ntargets = ['{host}', '{other}']\n\
+             [tools.{TOOL}]\nversion = '1.0.0'\nsource = 'github:owner/{TOOL}'\ntargets = ['{other}']\n"
+        ),
+    )
+    .unwrap();
+    let lock = format!(
+        "lock-version = 1\n[platforms]\ntargets = ['{host}', '{other}']\n\
+         [tools.{TOOL}]\nversion = '1.0.0'\nsource = 'github:owner/{TOOL}'\ntag = 'v1.0.0'\ntargets = ['{other}']\n\
+         [tools.{TOOL}.artifacts.{other}]\nasset = '{TOOL}'\nurl = '{url}'\nsha256 = '{sha}'\nformat = 'raw'\n"
+    );
+    fs::write(root.join("binloom.lock"), &lock).unwrap();
+    let fallback = tempfile::tempdir().unwrap();
+    let impostor = fallback.path().join(TOOL);
+    fs::write(&impostor, b"#!/bin/sh\necho 'wrong tool'\n").unwrap();
+    fs::set_permissions(&impostor, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let output = cli(root)
+        .env("PATH", fallback.path())
+        .args(["exec", TOOL])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        stderr(&output).contains(&format!("tool {TOOL} is not available on {host}")),
+        "{}",
+        stderr(&output)
+    );
+
+    let output = cli(root).arg("install").output().unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains(&format!("Skipped {TOOL}: not available on {host}"))
+    );
+    assert!(!root.join(".tools").join(TOOL).exists());
+    assert_eq!(fs::read_to_string(root.join("binloom.lock")).unwrap(), lock);
+    assert_eq!(server.shutdown(), 0);
+}

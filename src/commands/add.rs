@@ -1,15 +1,14 @@
-use std::{
-    fs::{self, OpenOptions},
-    io::{self, Write},
-    path::Path,
-};
+use std::{fmt::Write, fs, io, path::Path};
 
 use anyhow::{Context, Result, ensure};
 
 use super::{install, update};
 use crate::{
-    common::{LOCKFILE, MANIFEST, project_root, validate_tool_name, validate_version},
+    common::{
+        LOCKFILE, MANIFEST, project_root, validate_tool_name, validate_version, write_atomically,
+    },
     domain::{
+        lockfile::Lockfile,
         manifest::Manifest,
         sources::{Source, bare_version},
     },
@@ -18,9 +17,15 @@ use crate::{
 pub(crate) fn add(name: &str, source: &str, version: &str, asset: Option<&str>) -> Result<()> {
     let root = project_root()?;
 
-    add_with(&root, name, source, version, asset, || {
-        update::lock_added_tool(name).and_then(|()| install::install())
-    })
+    add_with(
+        &root,
+        name,
+        source,
+        version,
+        asset,
+        |manifest| update::lock_added_tool(&root, manifest, name),
+        install::install,
+    )
 }
 
 fn add_with(
@@ -29,24 +34,29 @@ fn add_with(
     source: &str,
     version: &str,
     asset: Option<&str>,
-    lock_and_install: impl FnOnce() -> Result<()>,
+    resolve: impl FnOnce(&Manifest) -> Result<Lockfile>,
+    install: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
     let manifest_path = root.join(MANIFEST);
     let lock_path = root.join(LOCKFILE);
 
-    let manifest = fs::read(&manifest_path).context("failed to read binloom.toml")?;
+    let manifest = fs::read_to_string(&manifest_path).context("failed to read binloom.toml")?;
     let lockfile = match fs::read(&lock_path) {
         Ok(content) => Some(content),
         Err(error) if error.kind() == io::ErrorKind::NotFound => None,
         Err(error) => return Err(error).context("failed to read binloom.lock"),
     };
 
-    write_tool(manifest_path.as_path(), name, source, version, asset)?;
+    let content = render_tool(&manifest_path, &manifest, name, source, version, asset)?;
+    let updated = Manifest::parse(&content, &manifest_path)?;
+    let updated_lock = resolve(&updated).with_context(|| format!("failed to resolve {name}"))?;
+    updated_lock.write_with_manifest(root, &content)?;
+    println!("Updated {}", lock_path.display());
 
-    let result = lock_and_install();
-
-    if let Err(error) = result {
-        if let Err(restore_error) = restore(&manifest_path, &manifest, &lock_path, lockfile) {
+    if let Err(error) = install() {
+        if let Err(restore_error) =
+            restore(&manifest_path, manifest.as_bytes(), &lock_path, lockfile)
+        {
             return Err(error.context(format!(
                 "failed to restore binloom.toml and binloom.lock: {restore_error:#}"
             )));
@@ -63,29 +73,30 @@ fn restore(
     manifest: &[u8],
     lock_path: &Path,
     lockfile: Option<Vec<u8>>,
-) -> io::Result<()> {
-    fs::write(manifest_path, manifest)?;
+) -> Result<()> {
+    write_atomically(manifest_path, manifest)?;
 
     match lockfile {
-        Some(content) => fs::write(lock_path, content),
+        Some(content) => write_atomically(lock_path, &content),
         None => match fs::remove_file(lock_path) {
-            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error.into()),
             _ => Ok(()),
         },
     }
 }
 
-fn write_tool(
+fn render_tool(
     path: &Path,
+    content: &str,
     name: &str,
     source: &str,
     version: &str,
     asset: Option<&str>,
-) -> Result<()> {
+) -> Result<String> {
     validate_tool_name(name)?;
     let version = bare_version(name, version);
     validate_version(version)?;
-    let manifest = Manifest::try_from(path)?;
+    let manifest = Manifest::parse(content, path)?;
     ensure!(
         !manifest.tools.contains_key(name),
         "tool {name} is already configured"
@@ -93,37 +104,55 @@ fn write_tool(
 
     let source = Source::try_from(source.to_owned()).map_err(anyhow::Error::msg)?;
 
-    let content = fs::read_to_string(path)?;
-    let mut file = OpenOptions::new().append(true).open(path)?;
+    let mut content = content.to_owned();
 
     if !content.ends_with('\n') {
-        writeln!(file)?;
+        content.push('\n');
     }
 
     if !content.ends_with("\n\n") {
-        writeln!(file)?;
+        content.push('\n');
     }
 
-    writeln!(file, "[tools.{name}]")?;
+    writeln!(content, "[tools.{name}]")?;
     writeln!(
-        file,
+        content,
         "version = {}",
         toml::Value::String(version.to_owned())
     )?;
-    writeln!(file, "source = {}", toml::Value::String(source.to_string()))?;
+    writeln!(
+        content,
+        "source = {}",
+        toml::Value::String(source.to_string())
+    )?;
     if let Some(asset) = asset {
-        writeln!(file, "asset = {}", toml::Value::String(asset.to_owned()))?;
+        writeln!(content, "asset = {}", toml::Value::String(asset.to_owned()))?;
     }
-    Ok(())
+    Ok(content)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
-        domain::lockfile::{LockedTool, Lockfile},
+        domain::{lockfile::LockedTool, platform::Platform},
         download,
     };
+
+    fn write_tool(
+        path: &Path,
+        name: &str,
+        source: &str,
+        version: &str,
+        asset: Option<&str>,
+    ) -> Result<()> {
+        let content = fs::read_to_string(path)?;
+        fs::write(
+            path,
+            render_tool(path, &content, name, source, version, asset)?,
+        )?;
+        Ok(())
+    }
 
     #[test]
     fn restores_manifest_and_existing_lockfile_when_install_fails() {
@@ -143,8 +172,10 @@ mod tests {
             "github:owner/example",
             "1.2.3",
             None,
-            || {
-                // Resolve offline, then use the real lockfile writer and installer.
+            |updated_manifest| {
+                assert!(updated_manifest.tools.contains_key("example"));
+                assert_eq!(fs::read(&manifest_path).unwrap(), manifest);
+                assert_eq!(fs::read(&lock_path).unwrap(), lockfile);
                 let mut updated = Lockfile::default();
                 updated.tools.insert(
                     "example".to_owned(),
@@ -154,14 +185,17 @@ mod tests {
                         tag: Some("v1.2.3".to_owned()),
                         sha256: None,
                         artifacts: Default::default(),
+                        ..LockedTool::default()
                     },
                 );
-                updated.write(&lock_path)?;
+                Ok(updated)
+            },
+            || {
                 assert_ne!(fs::read(&manifest_path).unwrap(), manifest);
                 assert_ne!(fs::read(&lock_path).unwrap(), lockfile);
 
                 // Missing artifacts fail installation before any download.
-                install::install_from(directory.path(), &download::client())
+                install::install_from(directory.path(), &download::client(), Platform::LinuxX86_64)
             },
         )
         .unwrap_err();

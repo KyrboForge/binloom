@@ -267,7 +267,8 @@ and `x86_64`/`amd64`/`x64`/`x86-64`. Every platform in the lockfile must
 resolve to its own asset: a pattern that names a single platform, such as
 `example_{version}_darwin_arm64.tar.gz`, or an asset that is shared across
 platforms is rejected instead of locking the wrong binary for other targets.
-The only accepted sharing is one macOS universal binary for both macOS targets.
+The only accepted sharing is one macOS universal binary for both macOS targets,
+and its name must say `universal`.
 `{target}` expands to Binloom's portable target for each platform. For example,
 cargo-nextest can use its prebuilt releases without requiring Rust:
 
@@ -306,6 +307,35 @@ change that safety window:
 [update]
 minimum-release-age-minutes = 1440
 ```
+
+### Platform targets
+
+By default every tool is locked for `macos-aarch64`, `macos-x86_64`,
+`linux-aarch64`, and `linux-x86_64`. A project can declare the platforms it
+supports instead, and narrow individual tools to a subset of them:
+
+```toml
+[platforms]
+targets = ["macos-aarch64", "linux-x86_64"]
+
+[tools.example]
+version = "1.2.3"
+source = "github:owner/example"
+targets = ["linux-x86_64"] # defaults to every [platforms] target
+```
+
+Only those four ids are accepted; unknown or duplicate ids, an empty list, and
+tool targets outside `[platforms] targets` (or without a `[platforms]` table)
+are rejected. Order does not matter. Binloom resolves exactly the declared
+targets, fails if any of them has no matching asset, and records the targets in
+`binloom.lock`. On a project host, `install` skips tools that exclude it and
+`exec` reports that the tool is unavailable instead of falling back to `PATH`.
+On a host outside `[platforms] targets`, `install` fails before changing
+anything. Without `[platforms]`, manifests and locks behave exactly as before.
+
+Binloom releases before target support reject these fields. Upgrade the pinned
+Binloom and its wrapper first (`binloomw update --self`), commit, and only then
+add `[platforms]` and run `binloomw update` to regenerate the lock.
 
 ## 🧰 Commands
 

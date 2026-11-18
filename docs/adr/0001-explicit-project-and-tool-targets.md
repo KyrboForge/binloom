@@ -4,7 +4,7 @@
 - **Date:** 2026-11-17
 - **Decision owners:** Binloom maintainers
 - **Related:** [ADR-0002](0002-linux-gnu-and-musl-targets.md), [ADR-0003](0003-cli-first-internal-install-core.md), [#36](https://github.com/KyrboForge/binloom/issues/36), [#38](https://github.com/KyrboForge/binloom/issues/38), [#40](https://github.com/KyrboForge/binloom/issues/40)
-- **Implementation status:** Not implemented by this ADR; this change is documentation only.
+- **Implementation status:** Implemented by [#36](https://github.com/KyrboForge/binloom/issues/36) for the four legacy targets (`macos-aarch64`, `macos-x86_64`, `linux-aarch64`, `linux-x86_64`); GNU/musl and Windows targets remain with [ADR-0002](0002-linux-gnu-and-musl-targets.md) and later work, and the upgrade transition with [#38](https://github.com/KyrboForge/binloom/issues/38).
 
 ## Context
 
@@ -21,7 +21,7 @@ Repositories increasingly mix platform-specific commands, including consumers su
 5. An identical upstream asset may serve more than one target **only where its compatibility is defensible** (e.g., verified universal macOS executable). Shared URL alone is not evidence of cross-OS compatibility.
 6. This is an **in-place additive evolution**: retain `manifest-version = 1` and `lock-version = 1`. No v2 format and no `binloom migrate` command. New fields are optional, but older Binloom executables may reject them; see upgrade protocol below.
 
-### Proposed manifest (illustrative, not currently accepted by the CLI)
+### Manifest example
 
 ```toml
 manifest-version = 1
@@ -33,9 +33,8 @@ version = "0.4.0" # illustration, not a release commitment
 targets = [
   "macos-aarch64",
   "macos-x86_64",
-  "linux-x86_64-gnu",
-  "linux-x86_64-musl",
-  "windows-x86_64",
+  "linux-aarch64",
+  "linux-x86_64",
 ]
 
 [tools.actionlint]
@@ -46,28 +45,28 @@ version = "1.7.7"
 [tools.linux-profiler]
 source = "github:example/linux-profiler"
 version = "1.0.0"
-targets = ["linux-x86_64-gnu"]
+targets = ["linux-x86_64"]
 ```
 
-Target names are **Binloom canonical IDs**, not upstream archive labels nor direct Rust target triples. An exact string set avoids ambiguous aliases in the persisted contract. Canonical sorting and de-duplication must be deterministic; duplicate or malformed entries should be rejected with useful diagnostics.
+Target names are **Binloom canonical IDs**. The lock orders them as `macos-aarch64`, `macos-x86_64`, `linux-aarch64`, `linux-x86_64` regardless of manifest order. Duplicate and malformed entries are rejected.
 
-### Proposed lock additions (still `lock-version = 1`)
+### Lock additions (still `lock-version = 1`)
 
 ```toml
 lock-version = 1
 
 [platforms]
-targets = ["linux-x86_64-gnu", "macos-aarch64"]
+targets = ["macos-aarch64", "linux-x86_64"]
 
 [tools.example]
 version = "1.2.3"
 source = "github:vendor/example"
 tag = "v1.2.3"
-targets = ["linux-x86_64-gnu"]
-asset-pattern = "example_{version}_{target}.tar.gz"
+targets = ["linux-x86_64"]
+asset-pattern = "example_{version}_{os}_{arch}.tar.gz"
 
-[tools.example.artifacts.linux-x86_64-gnu]
-asset = "example_1.2.3_x86_64-unknown-linux-gnu.tar.gz"
+[tools.example.artifacts.linux-x86_64]
+asset = "example_1.2.3_linux_x86_64.tar.gz"
 url = "https://example.invalid/example.tar.gz"
 sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 format = "tar-gz"

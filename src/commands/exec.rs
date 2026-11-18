@@ -1,4 +1,7 @@
-use super::install::{InstallOutput, ensure_tool_installed, ensure_unreserved_tool_name};
+use super::install::{
+    InstallOutput, ensure_project_host, ensure_tool_installed, ensure_unreserved_tool_name,
+    join_targets, tool_supports,
+};
 use crate::{
     common::{LOCKFILE, MANIFEST, TOOLS_DIR},
     domain::{lockfile::Lockfile, manifest::Manifest, platform::Platform},
@@ -148,12 +151,21 @@ fn ensure_managed_tool(root: &Path, name: Option<&str>) -> Result<Option<(PathBu
         .tools
         .get(name)
         .with_context(|| format!("missing lock entry for {name}; run `binloom update`"))?;
+    // An excluded managed tool fails here instead of falling back to PATH.
+    let host = Platform::current()?;
+    ensure_project_host(manifest.project_targets(), host)?;
+    if !tool_supports(tool, host) {
+        bail!(
+            "tool {name} is not available on {host}; its targets are {}",
+            join_targets(tool.targets.as_deref().unwrap_or_default())
+        );
+    }
 
     let lock = ensure_tool_installed(
         root,
         name,
         tool,
-        &Platform::current()?.to_string(),
+        &host.to_string(),
         &download::client(),
         InstallOutput::Stderr,
     )?;

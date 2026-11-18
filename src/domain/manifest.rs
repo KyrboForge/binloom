@@ -2,6 +2,7 @@ use crate::{
     common::{validate_tool_name, validate_version},
     domain::{
         lockfile::Lockfile,
+        platform::{Platform, canonical_targets},
         sources::{Source, bare_version},
     },
 };
@@ -18,6 +19,9 @@ pub(crate) struct Manifest {
 
     pub(crate) binloom: Binloom,
 
+    /// Explicit project targets; `None` keeps the legacy four-target matrix.
+    pub(crate) platforms: Option<Platforms>,
+
     #[serde(default)]
     pub(crate) tools: BTreeMap<String, Tool>,
 
@@ -33,10 +37,17 @@ pub(crate) struct Binloom {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct Platforms {
+    pub(crate) targets: Vec<Platform>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Tool {
     pub(crate) version: String,
     pub(crate) source: Source,
     pub(crate) asset: Option<String>,
+    pub(crate) targets: Option<Vec<Platform>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -60,13 +71,38 @@ impl TryFrom<&Path> for Manifest {
         let content = fs::read_to_string(path)
             .with_context(|| format!("failed to read {}", path.display()))?;
 
-        let manifest: Self = toml::from_str(&content)
+        Self::parse(&content, path)
+    }
+}
+
+impl Manifest {
+    pub(crate) fn parse(content: &str, path: &Path) -> Result<Self> {
+        let mut manifest: Self = toml::from_str(content)
             .with_context(|| format!("failed to parse {}", path.display()))?;
 
         if manifest.version != 1 {
             bail!("unsupported manifest version: {}", manifest.version);
         }
         validate_version(&manifest.binloom.version).context("invalid Binloom version")?;
+
+        if let Some(platforms) = &mut manifest.platforms {
+            platforms.targets =
+                canonical_targets(&platforms.targets).context("invalid [platforms] targets")?;
+        }
+        let project = manifest.project_targets().map(<[Platform]>::to_vec);
+        for (name, tool) in &mut manifest.tools {
+            let Some(targets) = &mut tool.targets else {
+                continue;
+            };
+            let project = project.as_deref().with_context(|| {
+                format!("tool {name} declares targets, but binloom.toml has no [platforms] targets")
+            })?;
+            *targets = canonical_targets(targets)
+                .with_context(|| format!("invalid targets for tool {name}"))?;
+            if let Some(target) = targets.iter().find(|target| !project.contains(target)) {
+                bail!("tool {name} target `{target}` is not in [platforms] targets");
+            }
+        }
 
         for (name, tool) in &manifest.tools {
             validate_tool_name(name)?;
@@ -87,14 +123,37 @@ impl TryFrom<&Path> for Manifest {
         }
         Ok(manifest)
     }
-}
 
-impl Manifest {
+    /// Declared project targets in canonical order, or `None` for legacy projects.
+    pub(crate) fn project_targets(&self) -> Option<&[Platform]> {
+        self.platforms
+            .as_ref()
+            .map(|platforms| platforms.targets.as_slice())
+    }
+
+    /// Targets a tool must resolve for: its own, the project's, or every
+    /// legacy platform when the project declares none.
+    pub(crate) fn tool_targets<'a>(&'a self, tool: &'a Tool) -> &'a [Platform] {
+        tool.targets
+            .as_deref()
+            .or(self.project_targets())
+            .unwrap_or(&Platform::ALL)
+    }
+
     pub(crate) fn ensure_matches_lockfile(&self, lockfile: &Lockfile) -> Result<()> {
-        let matches = self.tools.len() == lockfile.tools.len()
+        let explicit = self.platforms.is_some();
+        let matches = self.project_targets()
+            == lockfile
+                .platforms
+                .as_ref()
+                .map(|platforms| platforms.targets.as_slice())
+            && self.tools.len() == lockfile.tools.len()
             && self.tools.iter().all(|(name, tool)| {
                 lockfile.tools.get(name).is_some_and(|locked| {
-                    locked.version == tool.version && locked.source == tool.source.to_string()
+                    locked.version == tool.version
+                        && locked.source == tool.source.to_string()
+                        && locked.targets.as_deref() == explicit.then(|| self.tool_targets(tool))
+                        && (!explicit || locked.asset_pattern == tool.asset)
                 })
             });
 
@@ -107,11 +166,13 @@ impl Manifest {
     }
 }
 
-pub(crate) fn update_versions<'a>(
+/// Returns the manifest with updated versions without writing it, so callers
+/// can surface edit errors before changing any file.
+pub(crate) fn render_versions<'a>(
     path: &Path,
     binloom: Option<&str>,
     tools: impl IntoIterator<Item = (&'a str, &'a str)>,
-) -> Result<()> {
+) -> Result<String> {
     let content =
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
     let mut document = content
@@ -125,8 +186,7 @@ pub(crate) fn update_versions<'a>(
         set_version(&mut document["tools"][name]["version"], version)?;
     }
 
-    fs::write(path, document.to_string())
-        .with_context(|| format!("failed to write {}", path.display()))
+    Ok(document.to_string())
 }
 
 fn set_version(item: &mut Item, version: &str) -> Result<()> {
@@ -277,9 +337,8 @@ source = "github:evilmartians/lefthook"
         )
         .unwrap();
 
-        update_versions(&path, Some("0.1.1"), [("lefthook", "2.1.11")]).unwrap();
+        let content = render_versions(&path, Some("0.1.1"), [("lefthook", "2.1.11")]).unwrap();
 
-        let content = fs::read_to_string(path).unwrap();
         assert!(content.contains("# project tools"));
         assert!(content.contains("version = \"0.1.1\" # wrapper"));
         assert!(content.contains("version = \"2.1.11\" # hooks"));
@@ -335,9 +394,11 @@ version = "../../x"
                     version: "1.0.0".to_owned(),
                     source: Source::try_from("github:owner/tool".to_owned()).unwrap(),
                     asset: None,
+                    targets: None,
                 },
             )]),
             update: UpdateConfig::default(),
+            platforms: None,
         };
 
         let mut lockfile = Lockfile::default();
@@ -349,6 +410,7 @@ version = "../../x"
                 tag: Some("v1.0.0".to_owned()),
                 sha256: None,
                 artifacts: BTreeMap::new(),
+                ..LockedTool::default()
             },
         );
 
@@ -371,9 +433,164 @@ version = "../../x"
                 tag: Some("v1.0.0".to_owned()),
                 sha256: None,
                 artifacts: BTreeMap::new(),
+                ..LockedTool::default()
             },
         );
 
         assert!(manifest.ensure_matches_lockfile(&lockfile).is_err());
+    }
+
+    fn parse(content: &str) -> Result<Manifest> {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("binloom.toml");
+        fs::write(&path, content).unwrap();
+        Manifest::try_from(path.as_path())
+    }
+
+    const HEADER: &str = "manifest-version = 1\n\n[binloom]\nversion = \"0.1.0\"\n";
+
+    #[test]
+    fn resolves_inherited_and_narrowed_targets_in_canonical_order() {
+        let manifest = parse(&format!(
+            r#"{HEADER}
+[platforms]
+targets = ["linux-x86_64", "macos-aarch64", "linux-aarch64"]
+
+[tools.wide]
+version = "1.0.0"
+source = "github:owner/wide"
+
+[tools.narrow]
+version = "1.0.0"
+source = "github:owner/narrow"
+targets = ["linux-x86_64", "linux-aarch64"]
+"#
+        ))
+        .unwrap();
+
+        let project = [
+            Platform::MacosAarch64,
+            Platform::LinuxAarch64,
+            Platform::LinuxX86_64,
+        ];
+        assert_eq!(manifest.project_targets(), Some(&project[..]));
+        assert_eq!(manifest.tool_targets(&manifest.tools["wide"]), project);
+        assert_eq!(
+            manifest.tool_targets(&manifest.tools["narrow"]),
+            [Platform::LinuxAarch64, Platform::LinuxX86_64]
+        );
+    }
+
+    #[test]
+    fn legacy_manifest_targets_every_platform() {
+        let manifest = parse(&format!(
+            "{HEADER}\n[tools.tool]\nversion = \"1.0.0\"\nsource = \"github:owner/tool\"\n"
+        ))
+        .unwrap();
+
+        assert_eq!(manifest.project_targets(), None);
+        assert_eq!(
+            manifest.tool_targets(&manifest.tools["tool"]),
+            Platform::ALL
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_target_declarations() {
+        let tool = "[tools.tool]\nversion = \"1.0.0\"\nsource = \"github:owner/tool\"\n";
+        let cases = [
+            ("[platforms]\ntargets = []\n", "targets must not be empty"),
+            (
+                "[platforms]\ntargets = [\"windows-x86_64\"]\n",
+                "unknown target `windows-x86_64`",
+            ),
+            (
+                "[platforms]\ntargets = [\"linux-x86_64-musl\"]\n",
+                "unknown target `linux-x86_64-musl`",
+            ),
+            (
+                "[platforms]\ntargets = [\"linux-x86_64\", \"linux-x86_64\"]\n",
+                "duplicate target `linux-x86_64`",
+            ),
+            (
+                "[platforms]\ntargets = [\"linux-x86_64\"]\nos = \"linux\"\n",
+                "unknown field `os`",
+            ),
+            (
+                &format!("[platforms]\ntargets = [\"linux-x86_64\"]\n\n{tool}targets = []\n"),
+                "targets must not be empty",
+            ),
+            (
+                &format!(
+                    "[platforms]\ntargets = [\"linux-x86_64\"]\n\n{tool}targets = [\"macos-aarch64\"]\n"
+                ),
+                "tool tool target `macos-aarch64` is not in [platforms] targets",
+            ),
+            (
+                &format!("{tool}targets = [\"linux-x86_64\"]\n"),
+                "tool tool declares targets, but binloom.toml has no [platforms] targets",
+            ),
+        ];
+
+        for (body, expected) in cases {
+            let error = parse(&format!("{HEADER}\n{body}")).unwrap_err();
+            assert!(format!("{error:#}").contains(expected), "{body}: {error:#}");
+        }
+    }
+
+    #[test]
+    fn detects_target_and_asset_pattern_drift() {
+        let manifest = parse(&format!(
+            r#"{HEADER}
+[platforms]
+targets = ["linux-aarch64", "linux-x86_64"]
+
+[tools.tool]
+version = "1.0.0"
+source = "github:owner/tool"
+asset = "tool-{{os}}-{{arch}}"
+"#
+        ))
+        .unwrap();
+        let targets = vec![Platform::LinuxAarch64, Platform::LinuxX86_64];
+        let lockfile = || {
+            let mut lockfile = Lockfile {
+                platforms: Some(crate::domain::lockfile::LockedPlatforms {
+                    targets: targets.clone(),
+                }),
+                ..Lockfile::default()
+            };
+            lockfile.tools.insert(
+                "tool".to_owned(),
+                LockedTool {
+                    version: "1.0.0".to_owned(),
+                    source: "github:owner/tool".to_owned(),
+                    targets: Some(targets.clone()),
+                    asset_pattern: Some("tool-{os}-{arch}".to_owned()),
+                    ..LockedTool::default()
+                },
+            );
+            lockfile
+        };
+        assert!(manifest.ensure_matches_lockfile(&lockfile()).is_ok());
+
+        let drifted = |edit: &dyn Fn(&mut Lockfile)| {
+            let mut lockfile = lockfile();
+            edit(&mut lockfile);
+            manifest.ensure_matches_lockfile(&lockfile).is_err()
+        };
+        assert!(drifted(&|lock| lock.platforms = None));
+        assert!(drifted(&|lock| {
+            lock.platforms.as_mut().unwrap().targets = vec![Platform::LinuxX86_64];
+        }));
+        assert!(drifted(&|lock| {
+            lock.tools.get_mut("tool").unwrap().targets = Some(vec![Platform::LinuxX86_64]);
+        }));
+        assert!(drifted(&|lock| {
+            lock.tools.get_mut("tool").unwrap().asset_pattern = None;
+        }));
+        assert!(drifted(&|lock| {
+            lock.tools.get_mut("tool").unwrap().asset_pattern = Some("other".to_owned());
+        }));
     }
 }

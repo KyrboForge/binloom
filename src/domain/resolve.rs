@@ -3,7 +3,7 @@ use crate::domain::lockfile::{
     ArtifactFormat, ChecksumSource, LockedArtifact, LockedTool, LockedWrapper,
 };
 use crate::domain::manifest::Tool;
-use crate::domain::platform::Platform;
+use crate::domain::platform::{Platform, contains_token};
 use crate::domain::sources::{Source, bare_version, release};
 use crate::download;
 use crate::download::Client;
@@ -16,11 +16,13 @@ struct ReleaseRequest<'a> {
     name: &'a str,
     source: &'a Source,
     asset_pattern: Option<&'a str>,
+    targets: &'a [Platform],
 }
 
 pub(crate) fn resolve_tool(
     name: &str,
     tool: &Tool,
+    targets: &[Platform],
     version: Option<&str>,
     minimum_age_minutes: u64,
     client: &Client,
@@ -48,7 +50,7 @@ pub(crate) fn resolve_tool(
             source: source.to_string(),
             tag: None,
             sha256: Some(resolved.checksum),
-            artifacts: BTreeMap::new(),
+            ..LockedTool::default()
         });
     }
 
@@ -65,6 +67,7 @@ pub(crate) fn resolve_tool(
             name,
             source: &tool.source,
             asset_pattern: tool.asset.as_deref(),
+            targets,
         },
         &release,
         minimum_age_minutes,
@@ -141,8 +144,8 @@ fn resolve_release(
     let version = version_from_tag(&release.tag, request.name)?;
     let mut artifacts = BTreeMap::new();
     let mut emitted_warnings = BTreeSet::new();
-    let mut selected = Vec::with_capacity(Platform::ALL.len());
-    for platform in Platform::ALL {
+    let mut selected = Vec::with_capacity(request.targets.len());
+    for &platform in request.targets {
         let asset = match request.asset_pattern {
             Some(pattern) => release.find_asset_by_pattern(pattern, &version, platform)?,
             None => release.find_asset(request.name, platform, &mut emitted_warnings)?,
@@ -169,8 +172,8 @@ fn resolve_release(
         version,
         source: request.source.to_string(),
         tag: Some(release.tag.clone()),
-        sha256: None,
         artifacts,
+        ..LockedTool::default()
     })
 }
 
@@ -179,7 +182,8 @@ fn resolve_release(
 /// An asset is rejected for a platform when its name carries an OS or
 /// architecture token of a different platform, or when the same asset is
 /// locked for several platforms. The one tolerated sharing is a macOS
-/// universal binary: both macOS targets, no architecture token in the name.
+/// universal binary: both macOS targets, a `universal` token and no
+/// architecture token in the name; an unlabelled archive is not evidence.
 /// Platform tokens are read with the tool name and version blanked out, so a
 /// tool called `linux-tool` can still lock a macOS asset.
 fn ensure_platform_specific_assets(
@@ -189,6 +193,13 @@ fn ensure_platform_specific_assets(
 ) -> anyhow::Result<()> {
     const HINT: &str =
         "use {os}, {arch} or {target} in the asset pattern so every platform locks its own asset";
+    // OSes Binloom cannot target yet; naming one never matches any platform.
+    const UNSUPPORTED_OS_ALIASES: [&str; 3] = ["windows", "win32", "win64"];
+    // Likewise for architectures: `armv7` must never be locked as an x86_64 asset.
+    const UNSUPPORTED_ARCH_ALIASES: [&str; 14] = [
+        "arm", "armv5", "armv6", "armv7", "armv7l", "armhf", "i386", "i686", "386", "ppc64",
+        "ppc64le", "s390x", "riscv64", "mips64",
+    ];
     // `v1.0.0` must go before `1.0.0`: the `v` would otherwise glue the bare
     // version to an alphanumeric and keep it visible.
     let tagged = if version.is_empty() {
@@ -209,10 +220,14 @@ fn ensure_platform_specific_assets(
         let platform_part = platform_part(asset);
         let foreign_os = Platform::ALL.iter().any(|other| {
             other.os_aliases() != platform.os_aliases() && other.os_in(&platform_part)
-        });
+        }) || UNSUPPORTED_OS_ALIASES
+            .iter()
+            .any(|alias| contains_token(&platform_part, alias));
         let foreign_arch = Platform::ALL.iter().any(|other| {
             other.arch_aliases() != platform.arch_aliases() && other.arch_in(&platform_part)
-        });
+        }) || UNSUPPORTED_ARCH_ALIASES
+            .iter()
+            .any(|alias| contains_token(&platform_part, alias));
         // Name a whole platform only when both its OS and architecture appear
         // in the name, so a Linux asset is never blamed on macOS.
         let foreign = Platform::ALL.iter().find(|other| {
@@ -235,10 +250,12 @@ fn ensure_platform_specific_assets(
             if shared.name != asset.name {
                 continue;
             }
+            let shared_part = platform_part(asset);
             let universal_macos = platform.os_aliases() == other.os_aliases()
                 && platform.os_aliases()[0] == "macos"
-                && !platform.arch_in(&platform_part(asset))
-                && !other.arch_in(&platform_part(asset));
+                && contains_token(&shared_part, "universal")
+                && !platform.arch_in(&shared_part)
+                && !other.arch_in(&shared_part);
             if !universal_macos {
                 bail!(
                     "asset {} is selected for both {platform} and {other}; {HINT}",
@@ -326,6 +343,7 @@ fn resolve_binloom_release(
             name: "binloom",
             source,
             asset_pattern: None,
+            targets: &Platform::ALL,
         },
         release,
         minimum_age_minutes,
@@ -473,6 +491,7 @@ mod tests {
                     name: "binloom",
                     source: &source,
                     asset_pattern: None,
+                    targets: &Platform::ALL,
                 },
                 &release,
                 0,
@@ -527,6 +546,7 @@ mod tests {
                 name: "gitleaks",
                 source: &Source::try_from("github:gitleaks/gitleaks".to_owned()).unwrap(),
                 asset_pattern: pattern,
+                targets: &Platform::ALL,
             },
             &gitleaks_release(),
             0,
@@ -642,6 +662,24 @@ mod tests {
     }
 
     #[test]
+    fn rejects_unlabelled_archive_shared_by_both_macos_targets() {
+        let unlabelled = asset("tool-1.0.0.tar.gz");
+
+        let error = ensure_platform_specific_assets(
+            "tool",
+            "1.0.0",
+            &[
+                (Platform::MacosAarch64, &unlabelled),
+                (Platform::MacosX86_64, &unlabelled),
+            ],
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("is selected for both"), "{error}");
+    }
+
+    #[test]
     fn allows_universal_macos_asset_but_not_shared_linux_asset() {
         let universal = asset("tool-universal-apple-darwin.tar.gz");
         let linux = asset("tool-linux.tar.gz");
@@ -675,6 +713,105 @@ mod tests {
             ensure_platform_specific_assets("tool", "1.0.0", &[(Platform::MacosAarch64, &x86_64)])
                 .is_err()
         );
+    }
+
+    fn resolve_targets(
+        assets: &[&str],
+        pattern: Option<&str>,
+        targets: &[Platform],
+    ) -> anyhow::Result<LockedTool> {
+        let release = Release {
+            tag: "v1.0.0".to_owned(),
+            published_at: Some("2026-01-01T00:00:00Z".to_owned()),
+            assets: assets
+                .iter()
+                .map(|name| ReleaseAsset {
+                    sha256: Some("a".repeat(64)),
+                    ..asset(name)
+                })
+                .collect(),
+        };
+        resolve_release(
+            ReleaseRequest {
+                name: "tool",
+                source: &Source::try_from("github:owner/tool".to_owned()).unwrap(),
+                asset_pattern: pattern,
+                targets,
+            },
+            &release,
+            0,
+            &download::client(),
+            &mut BTreeMap::new(),
+        )
+    }
+
+    #[test]
+    fn resolves_exactly_the_requested_targets() {
+        let linux = ["tool-linux-arm64.tar.gz", "tool-linux-x64.tar.gz"];
+        let locked = resolve_targets(
+            &linux,
+            None,
+            &[Platform::LinuxAarch64, Platform::LinuxX86_64],
+        )
+        .unwrap();
+        assert_eq!(
+            locked.artifacts.keys().collect::<Vec<_>>(),
+            ["linux-aarch64", "linux-x86_64"]
+        );
+
+        // A required target without an artifact fails instead of being dropped.
+        let error = resolve_targets(
+            &linux,
+            None,
+            &[Platform::MacosAarch64, Platform::LinuxX86_64],
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("macos-aarch64"), "{error:#}");
+    }
+
+    #[test]
+    fn rejects_windows_asset_for_a_single_linux_target() {
+        let error = resolve_targets(
+            &["tool-1.0.0-windows-x86_64.zip"],
+            Some("tool-{version}-windows-{arch}.zip"),
+            &[Platform::LinuxX86_64],
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("names a different OS"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_architecture_asset_for_a_single_target() {
+        for (asset, targets) in [
+            ("tool-1.0.0-linux-armv7.tar.gz", [Platform::LinuxX86_64]),
+            ("tool-1.0.0-linux-i686.tar.gz", [Platform::LinuxAarch64]),
+        ] {
+            let error = resolve_targets(&[asset], Some(asset), &targets).unwrap_err();
+            assert!(
+                format!("{error:#}").contains("names a different architecture"),
+                "{error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolves_universal_macos_asset_for_macos_only_targets() {
+        let locked = resolve_targets(
+            &["tool-universal-apple-darwin.tar.gz"],
+            Some("tool-{target}.tar.gz"),
+            &[Platform::MacosAarch64, Platform::MacosX86_64],
+        )
+        .unwrap();
+        assert!(
+            locked
+                .artifacts
+                .values()
+                .all(|artifact| artifact.asset == "tool-universal-apple-darwin.tar.gz")
+        );
+        assert_eq!(locked.artifacts.len(), 2);
     }
 
     #[test]
@@ -864,6 +1001,7 @@ mod tests {
             tag: None,
             sha256: Some(resolved.checksum),
             artifacts: BTreeMap::new(),
+            ..LockedTool::default()
         };
 
         assert_eq!(locked.version, "1.2.3");

@@ -39,24 +39,56 @@ pub(crate) fn install_with_prompt(no_prompt: bool) -> Result<()> {
 pub(crate) fn install() -> Result<()> {
     let root = project_root()?;
     let lock_path = root.join(LOCKFILE);
+    let host = Platform::current()?;
 
     if !lock_path
         .try_exists()
         .context("failed to check binloom.lock")?
     {
+        // Refuse an unsupported host before creating the lock.
+        let manifest = Manifest::try_from(root.join(MANIFEST).as_path())?;
+        ensure_project_host(manifest.project_targets(), host)?;
         update::lock()?;
     }
 
     let client = download::client();
 
-    install_from(&root, &client)
+    install_from(&root, &client, host)
 }
 
-pub(super) fn install_from(root: &Path, client: &download::Client) -> Result<()> {
+/// Fails when an explicit-target project does not support `host`.
+pub(super) fn ensure_project_host(targets: Option<&[Platform]>, host: Platform) -> Result<()> {
+    if let Some(targets) = targets {
+        ensure!(
+            targets.contains(&host),
+            "this project does not support {host}; [platforms] targets are {}",
+            join_targets(targets)
+        );
+    }
+    Ok(())
+}
+
+/// True when a locked tool is available on `host`; legacy entries cover every platform.
+pub(super) fn tool_supports(tool: &LockedTool, host: Platform) -> bool {
+    tool.targets
+        .as_ref()
+        .is_none_or(|targets| targets.contains(&host))
+}
+
+pub(super) fn join_targets(targets: &[Platform]) -> String {
+    targets
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+pub(super) fn install_from(root: &Path, client: &download::Client, host: Platform) -> Result<()> {
     let manifest_path = root.join(MANIFEST);
     let lock_path = root.join(LOCKFILE);
 
     let manifest = Manifest::try_from(manifest_path.as_path())?;
+    ensure_project_host(manifest.project_targets(), host)?;
     let lockfile = Lockfile::try_from(lock_path.as_path())?;
 
     manifest.ensure_matches_lockfile(&lockfile)?;
@@ -87,10 +119,13 @@ pub(super) fn install_from(root: &Path, client: &download::Client) -> Result<()>
         }
     }
 
-    let platform = Platform::current()?;
-    let platform_key = platform.to_string();
+    let platform_key = host.to_string();
 
     for (name, tool) in &lockfile.tools {
+        if !tool_supports(tool, host) {
+            println!("Skipped {name}: not available on {host}");
+            continue;
+        }
         let _lock = ensure_tool_installed(
             root,
             name,
@@ -956,7 +991,7 @@ fn link_tool(root: &Path, name: &str, version: &str) -> Result<()> {
 mod tests {
     use super::*;
     use crate::{
-        domain::lockfile::ChecksumSource,
+        domain::lockfile::{ChecksumSource, LockedPlatforms},
         http_fixture::{Response, Server},
     };
     use flate2::{Compression, write::GzEncoder};
@@ -1005,6 +1040,7 @@ source = "github:owner/tool"
                         checksum_source: ChecksumSource::Download,
                     },
                 )]),
+                ..LockedTool::default()
             },
         );
 
@@ -1455,7 +1491,7 @@ source = "github:owner/tool"
 
         let client = download::client();
 
-        install_from(directory.path(), &client).unwrap();
+        install_from(directory.path(), &client, Platform::current().unwrap()).unwrap();
 
         let installed = directory.path().join(".tools/tool/1.0.0/tool");
 
@@ -1478,6 +1514,109 @@ source = "github:owner/tool"
         assert_eq!(server.requests()[0].path, "/tool");
     }
 
+    fn write_explicit_project(root: &Path, url: &str, sha256: &str) {
+        fs::write(
+            root.join("binloom.toml"),
+            r#"manifest-version = 1
+
+[binloom]
+version = "0.2.2"
+
+[platforms]
+targets = ["linux-aarch64", "linux-x86_64"]
+
+[tools.tool]
+version = "1.0.0"
+source = "github:owner/tool"
+targets = ["linux-x86_64"]
+
+[tools.arm]
+version = "1.0.0"
+source = "github:owner/arm"
+targets = ["linux-aarch64"]
+"#,
+        )
+        .unwrap();
+
+        let locked = |name: &str, platform: Platform| LockedTool {
+            version: "1.0.0".to_owned(),
+            source: format!("github:owner/{name}"),
+            tag: Some("v1.0.0".to_owned()),
+            targets: Some(vec![platform]),
+            artifacts: BTreeMap::from([(
+                platform.to_string(),
+                LockedArtifact {
+                    asset: name.to_owned(),
+                    url: format!("{url}/{name}"),
+                    sha256: sha256.to_owned(),
+                    format: ArtifactFormat::Raw,
+                    checksum_source: ChecksumSource::Download,
+                },
+            )]),
+            ..LockedTool::default()
+        };
+        let mut lockfile = Lockfile {
+            platforms: Some(LockedPlatforms {
+                targets: vec![Platform::LinuxAarch64, Platform::LinuxX86_64],
+            }),
+            ..Lockfile::default()
+        };
+        lockfile
+            .tools
+            .insert("tool".to_owned(), locked("tool", Platform::LinuxX86_64));
+        lockfile
+            .tools
+            .insert("arm".to_owned(), locked("arm", Platform::LinuxAarch64));
+        lockfile.write(root.join("binloom.lock").as_path()).unwrap();
+    }
+
+    #[test]
+    fn installs_only_tools_targeting_the_host() {
+        let directory = tempfile::tempdir().unwrap();
+        let binary = b"x86 tool";
+        let server = Server::start(vec![Response {
+            status: 200,
+            body: binary.to_vec(),
+        }]);
+        write_explicit_project(directory.path(), server.url(), &checksum(binary));
+        let lock = fs::read(directory.path().join("binloom.lock")).unwrap();
+
+        install_from(directory.path(), &download::client(), Platform::LinuxX86_64).unwrap();
+
+        assert_eq!(
+            fs::read(directory.path().join(".tools/tool/1.0.0/tool")).unwrap(),
+            binary
+        );
+        assert!(!directory.path().join(".tools/arm").exists());
+        assert_eq!(server.requests().len(), 1);
+        assert_eq!(server.requests()[0].path, "/tool");
+        assert_eq!(
+            fs::read(directory.path().join("binloom.lock")).unwrap(),
+            lock
+        );
+    }
+
+    #[test]
+    fn rejects_host_outside_project_targets_before_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        let server = Server::start(Vec::new());
+        write_explicit_project(directory.path(), server.url(), &"0".repeat(64));
+
+        let error = install_from(
+            directory.path(),
+            &download::client(),
+            Platform::MacosAarch64,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "this project does not support macos-aarch64; [platforms] targets are linux-aarch64, linux-x86_64"
+        );
+        assert!(!directory.path().join(".tools").exists());
+        assert!(server.requests().is_empty());
+    }
+
     #[test]
     fn rejects_download_with_wrong_checksum() {
         let directory = tempfile::tempdir().unwrap();
@@ -1493,7 +1632,8 @@ source = "github:owner/tool"
         );
 
         let client = download::client();
-        let error = install_from(directory.path(), &client).unwrap_err();
+        let error =
+            install_from(directory.path(), &client, Platform::current().unwrap()).unwrap_err();
 
         assert!(format!("{error:#}").contains("checksum mismatch for tool"));
         assert!(!directory.path().join(".tools/tool/1.0.0/tool").exists());
@@ -1525,7 +1665,7 @@ source = "github:owner/tool"
 
         let client = download::client();
 
-        install_from(directory.path(), &client).unwrap();
+        install_from(directory.path(), &client, Platform::current().unwrap()).unwrap();
 
         assert_eq!(fs::read(install_directory.join("tool")).unwrap(), binary);
         assert_eq!(

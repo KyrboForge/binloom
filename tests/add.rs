@@ -1,7 +1,7 @@
 use std::{fs, process::Command};
 
 #[test]
-fn add_restores_manifest_when_resolution_fails() {
+fn add_leaves_project_files_unchanged_when_resolution_fails() {
     let directory = tempfile::tempdir().unwrap();
     let manifest = "manifest-version = 1\n\n[binloom]\nversion = \"0.1.0\"\n";
 
@@ -33,7 +33,7 @@ fn add_restores_manifest_when_resolution_fails() {
     assert!(
         String::from_utf8(output.stderr)
             .unwrap()
-            .contains("binloom.toml was restored")
+            .contains("failed to resolve example")
     );
     assert_eq!(
         fs::read_to_string(directory.path().join("binloom.toml")).unwrap(),
