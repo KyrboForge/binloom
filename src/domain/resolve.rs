@@ -182,7 +182,8 @@ fn resolve_release(
 /// An asset is rejected for a platform when its name carries an OS or
 /// architecture token of a different platform, or when the same asset is
 /// locked for several platforms. The one tolerated sharing is a macOS
-/// universal binary: both macOS targets, no architecture token in the name.
+/// universal binary: both macOS targets, a `universal` token and no
+/// architecture token in the name; an unlabelled archive is not evidence.
 /// Platform tokens are read with the tool name and version blanked out, so a
 /// tool called `linux-tool` can still lock a macOS asset.
 fn ensure_platform_specific_assets(
@@ -242,10 +243,12 @@ fn ensure_platform_specific_assets(
             if shared.name != asset.name {
                 continue;
             }
+            let shared_part = platform_part(asset);
             let universal_macos = platform.os_aliases() == other.os_aliases()
                 && platform.os_aliases()[0] == "macos"
-                && !platform.arch_in(&platform_part(asset))
-                && !other.arch_in(&platform_part(asset));
+                && contains_token(&shared_part, "universal")
+                && !platform.arch_in(&shared_part)
+                && !other.arch_in(&shared_part);
             if !universal_macos {
                 bail!(
                     "asset {} is selected for both {platform} and {other}; {HINT}",
@@ -647,6 +650,24 @@ mod tests {
         let error = ensure_platform_specific_assets("tool", "1.0.0", &selected)
             .unwrap_err()
             .to_string();
+
+        assert!(error.contains("is selected for both"), "{error}");
+    }
+
+    #[test]
+    fn rejects_unlabelled_archive_shared_by_both_macos_targets() {
+        let unlabelled = asset("tool-1.0.0.tar.gz");
+
+        let error = ensure_platform_specific_assets(
+            "tool",
+            "1.0.0",
+            &[
+                (Platform::MacosAarch64, &unlabelled),
+                (Platform::MacosX86_64, &unlabelled),
+            ],
+        )
+        .unwrap_err()
+        .to_string();
 
         assert!(error.contains("is selected for both"), "{error}");
     }
