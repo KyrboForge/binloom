@@ -2,7 +2,7 @@ use super::update;
 use crate::{
     common::{LOCKFILE, MANIFEST, TOOLS_DIR, project_root},
     domain::{
-        lockfile::{ArtifactFormat, LockedTool, Lockfile},
+        lockfile::{ArtifactFormat, LockedArtifact, LockedTool, Lockfile},
         manifest::Manifest,
         platform::Platform,
         sources::{CargoSource, Source},
@@ -11,6 +11,9 @@ use crate::{
 };
 use anyhow::{Context, Result, bail, ensure};
 use flate2::read::GzDecoder;
+use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::{
     fs,
     io::{self, Read, Seek, Write},
@@ -18,6 +21,11 @@ use std::{
     process::{Command, Stdio},
 };
 use tar::{Archive, EntryType};
+
+const RETAINED_ARTIFACT: &str = ".artifact";
+const ARTIFACT_SHA256: &str = ".artifact-sha256";
+const CRATE_SHA256: &str = ".crate-sha256";
+const EXECUTABLE_SHA256: &str = ".executable-sha256";
 
 pub(crate) fn install_with_prompt(no_prompt: bool) -> Result<()> {
     install()?;
@@ -49,14 +57,9 @@ pub(super) fn install_from(root: &Path, client: &download::Client) -> Result<()>
 
     manifest.ensure_matches_lockfile(&lockfile)?;
 
-    // Case-insensitive filesystems would alias `.tools/.bin/Binloom` to the manager link.
-    ensure!(
-        !lockfile
-            .tools
-            .keys()
-            .any(|name| name.eq_ignore_ascii_case("binloom")),
-        "tool name binloom is reserved for the project-locked Binloom binary"
-    );
+    for name in lockfile.tools.keys() {
+        ensure_unreserved_tool_name(name)?;
+    }
     ensure!(
         !lockfile.tools.is_empty() || lockfile.binloom.is_some(),
         "no tools in binloom.lock"
@@ -84,85 +87,25 @@ pub(super) fn install_from(root: &Path, client: &download::Client) -> Result<()>
     let platform_key = platform.to_string();
 
     for (name, tool) in &lockfile.tools {
-        let source = Source::try_from(tool.source.clone()).map_err(anyhow::Error::msg)?;
-
-        if let Source::Cargo(source) = source {
-            install_cargo(root, name, tool, &source, client)?;
-            continue;
-        }
-        let artifact = tool
-            .artifacts
-            .get(&platform_key)
-            .with_context(|| format!("tool {name} has no artifact for {platform}"))?;
-
-        let directory = root.join(TOOLS_DIR).join(name).join(&tool.version);
-
-        fs::create_dir_all(&directory)
-            .with_context(|| format!("failed to create {}", directory.display()))?;
-
-        let destination = directory.join(name);
-        let checksum_stamp = directory.join(".artifact-sha256");
-
-        if cached_artifact_matches(&destination, &checksum_stamp, &artifact.sha256)? {
-            println!("Already installed {name} {}", tool.version);
-            link_tool(root, name, &tool.version)?;
-            continue;
-        }
-
-        let mut downloaded = tempfile::NamedTempFile::new_in(&directory)?;
-
-        let actual_sha256 = download::download_to(client, &artifact.url, &mut downloaded)?;
-
-        ensure!(
-            actual_sha256 == artifact.sha256,
-            "checksum mismatch for {name}: expected {}, got {actual_sha256}",
-            artifact.sha256
-        );
-
-        let mut executable = tempfile::NamedTempFile::new_in(&directory)?;
-        let downloaded_file = downloaded.reopen()?;
-
-        unpack(
-            artifact.format,
+        ensure_tool_installed(
+            root,
             name,
-            downloaded_file,
-            executable.as_file_mut(),
-        )
-        .with_context(|| format!("failed to unpack {}", artifact.asset))?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-
-            executable
-                .as_file()
-                .set_permissions(fs::Permissions::from_mode(0o755))?;
-        }
-
-        executable.as_file().sync_all()?;
-
-        executable
-            .persist(&destination)
-            .map_err(|error| error.error)
-            .with_context(|| format!("failed to install {}", destination.display()))?;
-
-        fs::write(&checksum_stamp, format!("{}\n", artifact.sha256))
-            .with_context(|| format!("failed to write {}", checksum_stamp.display()))?;
-
-        link_tool(root, name, &tool.version)?;
-
-        println!("Installed {name} {}", tool.version);
+            tool,
+            &platform_key,
+            client,
+            InstallOutput::Stdout,
+        )?;
     }
 
     if let Some(binloom) = &lockfile.binloom {
         let directory = root.join(TOOLS_DIR).join("binloom").join(&binloom.version);
         let cached = directory.join("binloom");
         let matches = match binloom.artifacts.get(&platform_key) {
-            Some(artifact) => cached_artifact_matches(
-                &cached,
-                &directory.join(".artifact-sha256"),
-                &artifact.sha256,
-            )?,
+            // The POSIX wrapper owns the Binloom bootstrap cache and its stamp format.
+            Some(artifact) => {
+                cached.is_file()
+                    && checksum_matches(&directory.join(ARTIFACT_SHA256), &artifact.sha256)?
+            }
             None => false,
         };
         if matches {
@@ -184,97 +127,340 @@ pub(super) fn install_from(root: &Path, client: &download::Client) -> Result<()>
     Ok(())
 }
 
-fn install_cargo(
+pub(super) fn ensure_unreserved_tool_name(name: &str) -> Result<()> {
+    // Case-insensitive filesystems would alias `.tools/.bin/Binloom` to the manager link.
+    ensure!(
+        !name.eq_ignore_ascii_case("binloom"),
+        "tool name binloom is reserved for the project-locked Binloom binary"
+    );
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum InstallOutput {
+    Stdout,
+    Stderr,
+}
+
+pub(super) fn ensure_tool_installed(
     root: &Path,
     name: &str,
     tool: &LockedTool,
-    source: &CargoSource,
+    platform_key: &str,
     client: &download::Client,
+    output: InstallOutput,
 ) -> Result<()> {
-    let expected_sha256 = tool
-        .sha256
-        .as_deref()
-        .context("Cargo lock entry is missing SHA-256")?;
+    let source = Source::try_from(tool.source.clone()).map_err(anyhow::Error::msg)?;
+    let version = &tool.version;
 
-    let directory = root.join(TOOLS_DIR).join(name).join(&tool.version);
-    let destination = directory.join(name);
-    let checksum_stamp = directory.join(".crate-sha256");
+    let cached = match source {
+        Source::Cargo(source) => {
+            let sha256 = tool
+                .sha256
+                .as_deref()
+                .context("Cargo lock entry is missing SHA-256")?;
+            ensure_cached(
+                root,
+                name,
+                version,
+                CRATE_SHA256,
+                sha256,
+                None,
+                |directory, destination, stamp| {
+                    let install_root =
+                        install_cargo(directory, name, version, &source, sha256, client, output)?;
+                    let staged = install_root.path().join("bin").join(name);
+                    persist_executable(&staged, destination, stamp, sha256, None)
+                },
+            )?
+        }
+        Source::GitHub(_) | Source::GitLab(_) => {
+            let artifact = tool
+                .artifacts
+                .get(platform_key)
+                .with_context(|| format!("tool {name} has no artifact for {platform_key}"))?;
+            ensure_cached(
+                root,
+                name,
+                version,
+                ARTIFACT_SHA256,
+                &artifact.sha256,
+                Some(artifact.format),
+                |directory, destination, stamp| {
+                    install_artifact(directory, name, artifact, client, destination, stamp)
+                },
+            )?
+        }
+    };
 
-    fs::create_dir_all(&directory)
-        .with_context(|| format!("failed to create {}", directory.display()))?;
-
-    if cached_artifact_matches(&destination, &checksum_stamp, expected_sha256)? {
-        println!("Already installed {name} {}", tool.version);
-        link_tool(root, name, &tool.version)?;
-        return Ok(());
+    match (output, cached) {
+        (InstallOutput::Stdout, true) => println!("Already installed {name} {version}"),
+        (InstallOutput::Stdout, false) => println!("Installed {name} {version}"),
+        // exec stays quiet on cache hits so repeated runs add no noise.
+        (InstallOutput::Stderr, false) => eprintln!("Installed {name} {version}"),
+        (InstallOutput::Stderr, true) => {}
     }
+    Ok(())
+}
 
+fn ensure_cached(
+    root: &Path,
+    name: &str,
+    version: &str,
+    checksum_file: &str,
+    expected_sha256: &str,
+    format: Option<ArtifactFormat>,
+    install: impl FnOnce(&Path, &Path, &Path) -> Result<()>,
+) -> Result<bool> {
+    let tools_directory = root.join(TOOLS_DIR);
+    let tool_directory = tools_directory.join(name);
+    let directory = tool_directory.join(version);
+    // Check each component before creating any children beneath it.
+    for path in [&tools_directory, &tool_directory, &directory] {
+        create_cache_directory(path)?;
+    }
+    let lock_path = directory.join(".install.lock");
+    check_cache_type(&lock_path, fs::Metadata::is_file)?;
+    let lock = fs::OpenOptions::new()
+        // On macOS and Linux, opening both ends of a FIFO does not wait for a peer.
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .with_context(|| format!("failed to open {}", lock_path.display()))?;
+    ensure!(
+        lock.metadata()?.is_file(),
+        "expected regular file at {}",
+        lock_path.display()
+    );
+    lock.lock()
+        .with_context(|| format!("failed to lock {}", lock_path.display()))?;
+
+    let destination = directory.join(name);
+    let checksum_stamp = directory.join(checksum_file);
+    let cached =
+        cached_executable_matches(&destination, &checksum_stamp, expected_sha256, format, name)?;
+    if !cached {
+        install(&directory, &destination, &checksum_stamp).with_context(|| {
+            format!("failed to install tool {name} at {}", destination.display())
+        })?;
+    }
+    link_tool(root, name, version)?;
+    Ok(cached)
+}
+
+fn create_cache_directory(path: &Path) -> Result<()> {
+    let created = fs::create_dir_all(path);
+    check_cache_type(path, fs::Metadata::is_dir)?;
+    created.with_context(|| format!("failed to create {}", path.display()))
+}
+
+fn check_cache_type(path: &Path, expected: fn(&fs::Metadata) -> bool) -> Result<()> {
+    match path.symlink_metadata() {
+        Ok(metadata) => ensure!(
+            expected(&metadata),
+            "refusing symlink or unexpected file type at {}",
+            path.display()
+        ),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to inspect {}", path.display()));
+        }
+    }
+    Ok(())
+}
+
+fn install_artifact(
+    directory: &Path,
+    name: &str,
+    artifact: &LockedArtifact,
+    client: &download::Client,
+    destination: &Path,
+    stamp: &Path,
+) -> Result<()> {
+    let mut downloaded = tempfile::NamedTempFile::new_in(directory)?;
+    let actual_sha256 = download::download_to(client, &artifact.url, &mut downloaded)?;
+    ensure!(
+        actual_sha256 == artifact.sha256,
+        "checksum mismatch for {name}: expected {}, got {actual_sha256}",
+        artifact.sha256
+    );
+
+    let mut executable = tempfile::NamedTempFile::new_in(directory)?;
+    unpack(
+        artifact.format,
+        name,
+        downloaded.reopen()?,
+        executable.as_file_mut(),
+    )
+    .with_context(|| format!("failed to unpack {}", artifact.asset))?;
+
+    #[cfg(unix)]
+    executable
+        .as_file()
+        .set_permissions(fs::Permissions::from_mode(0o755))?;
+
+    let retained = (!matches!(artifact.format, ArtifactFormat::Raw)).then_some(downloaded);
+    persist_executable(
+        executable.path(),
+        destination,
+        stamp,
+        &artifact.sha256,
+        retained,
+    )
+}
+
+fn install_cargo(
+    directory: &Path,
+    name: &str,
+    version: &str,
+    source: &CargoSource,
+    expected_sha256: &str,
+    client: &download::Client,
+    output: InstallOutput,
+) -> Result<tempfile::TempDir> {
     ensure_cargo_toolchain()?;
 
-    let mut archive = tempfile::NamedTempFile::new_in(&directory)?;
-    let actual_sha256 =
-        download::download_to(client, &source.download_url(&tool.version), &mut archive)?;
-
+    let mut archive = tempfile::NamedTempFile::new_in(directory)?;
+    let actual_sha256 = download::download_to(client, &source.download_url(version), &mut archive)?;
     ensure!(
         actual_sha256 == expected_sha256,
         "checksum mismatch for {name}: expected {expected_sha256}, got {actual_sha256}"
     );
 
-    let extracted = tempfile::tempdir_in(&directory)?;
-    let archive_file = archive.reopen()?;
-
-    tar::Archive::new(GzDecoder::new(archive_file))
+    let extracted = tempfile::tempdir_in(directory)?;
+    tar::Archive::new(GzDecoder::new(archive.reopen()?))
         .unpack(extracted.path())
         .context("failed to unpack Cargo package")?;
 
     let package_root = extracted
         .path()
-        .join(format!("{}-{}", source.package(), tool.version));
-
+        .join(format!("{}-{version}", source.package()));
     ensure!(
         package_root.join("Cargo.toml").is_file(),
         "Cargo package archive has no expected Cargo.toml"
     );
 
-    let install_root = tempfile::tempdir_in(&directory)?;
-
-    let status = Command::new("cargo")
+    let install_root = tempfile::tempdir_in(directory)?;
+    let mut command = Command::new("cargo");
+    command
         .arg("install")
         .arg("--path")
         .arg(&package_root)
         .arg("--locked")
         .arg("--root")
-        .arg(install_root.path())
-        .status()
-        .context("failed to run cargo install")?;
-
+        .arg(install_root.path());
+    if let InstallOutput::Stderr = output {
+        command.stdout(io::stderr());
+    }
+    let status = command.status().context("failed to run cargo install")?;
     ensure!(
         status.success(),
-        "cargo install failed for {}@{}",
-        source.package(),
-        tool.version
+        "cargo install failed for {}@{version}",
+        source.package()
     );
 
     let installed = install_root.path().join("bin").join(name);
-
     ensure!(
-        installed.is_file(),
+        installed
+            .symlink_metadata()
+            .is_ok_and(|metadata| metadata.is_file()),
         "Cargo package {} did not install binary {name}",
         source.package()
     );
 
-    fs::rename(&installed, &destination)
-        .with_context(|| format!("failed to install {}", destination.display()))?;
+    Ok(install_root)
+}
 
-    fs::write(&checksum_stamp, format!("{expected_sha256}\n"))
-        .with_context(|| format!("failed to write {}", checksum_stamp.display()))?;
+fn persist_executable(
+    staged: &Path,
+    destination: &Path,
+    checksum_stamp: &Path,
+    expected_sha256: &str,
+    archive: Option<tempfile::NamedTempFile>,
+) -> Result<()> {
+    let mut executable = fs::File::open(staged)?;
+    let sha256 = sha256_reader(&mut executable)?;
+    executable.sync_all()?;
 
-    link_tool(root, name, &tool.version)?;
+    let executable_stamp = checksum_stamp.with_file_name(EXECUTABLE_SHA256);
+    let directory = checksum_stamp
+        .parent()
+        .context("missing install directory")?;
+    let mut source_checksum = tempfile::NamedTempFile::new_in(directory)?;
+    let mut executable_checksum = tempfile::NamedTempFile::new_in(directory)?;
+    writeln!(source_checksum, "{expected_sha256}")?;
+    writeln!(executable_checksum, "{sha256}")?;
+    source_checksum.as_file().sync_all()?;
+    executable_checksum.as_file().sync_all()?;
 
-    println!("Installed {name} {}", tool.version);
+    // Invalidate all stamps before replacement so a previous source cannot
+    // validate against the new executable stamp.
+    let retained = directory.join(RETAINED_ARTIFACT);
+    for path in [
+        &executable_stamp,
+        &directory.join(ARTIFACT_SHA256),
+        &directory.join(CRATE_SHA256),
+        &retained,
+    ] {
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to remove {}", path.display()));
+            }
+        }
+    }
+    if let Some(archive) = archive {
+        archive
+            .persist(&retained)
+            .with_context(|| format!("failed to retain {}", retained.display()))?;
+    }
+    fs::rename(staged, destination)?;
+    for (temporary, stamp) in [
+        (source_checksum, checksum_stamp),
+        (executable_checksum, executable_stamp.as_path()),
+    ] {
+        temporary
+            .persist(stamp)
+            .map_err(|error| error.error)
+            .with_context(|| format!("failed to write {}", stamp.display()))?;
+    }
 
     Ok(())
 }
+
+#[derive(Default)]
+struct Sha256Writer(Sha256);
+
+impl Write for Sha256Writer {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.update(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Sha256Writer {
+    fn finish(self) -> String {
+        self.0
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+}
+
+fn sha256_reader(mut reader: impl Read) -> io::Result<String> {
+    let mut digest = Sha256Writer::default();
+    io::copy(&mut reader, &mut digest)?;
+    Ok(digest.finish())
+}
+
 fn command_available(command: &str) -> bool {
     Command::new(command)
         .arg("--version")
@@ -294,25 +480,84 @@ fn ensure_cargo_toolchain() -> Result<()> {
     Ok(())
 }
 
-fn cached_artifact_matches(
+fn cached_file_metadata(path: &Path) -> Result<Option<fs::Metadata>> {
+    match path.symlink_metadata() {
+        Ok(metadata) => Ok(metadata.is_file().then_some(metadata)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("failed to inspect {}", path.display())),
+    }
+}
+
+fn cached_executable_matches(
     destination: &Path,
     checksum_stamp: &Path,
     expected_sha256: &str,
+    format: Option<ArtifactFormat>,
+    name: &str,
 ) -> Result<bool> {
-    if !destination.is_file() {
+    let Some(metadata) = cached_file_metadata(destination)? else {
+        return Ok(false);
+    };
+    #[cfg(unix)]
+    if metadata.permissions().mode() & 0o111 == 0 {
+        return Ok(false);
+    }
+    if !checksum_matches(checksum_stamp, expected_sha256)? {
         return Ok(false);
     }
 
-    let installed_sha256 = match fs::read_to_string(checksum_stamp) {
-        Ok(checksum) => checksum,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => {
-            return Err(error)
-                .with_context(|| format!("failed to read {}", checksum_stamp.display()));
-        }
+    let executable_stamp = checksum_stamp.with_file_name(EXECUTABLE_SHA256);
+    let Some(expected) = read_checksum(&executable_stamp)? else {
+        return Ok(false);
     };
+    let actual = fs::File::open(destination)
+        .and_then(sha256_reader)
+        .with_context(|| format!("failed to hash {}", destination.display()))?;
+    if actual != expected.trim() {
+        return Ok(false);
+    }
+    match format {
+        None => Ok(true), // Cargo builds use their locally recorded executable digest.
+        Some(ArtifactFormat::Raw) => Ok(actual == expected_sha256),
+        Some(format) => {
+            let path = checksum_stamp.with_file_name(RETAINED_ARTIFACT);
+            if cached_file_metadata(&path)?.is_none() {
+                return Ok(false);
+            }
+            let mut archive = fs::File::open(&path)
+                .with_context(|| format!("failed to open {}", path.display()))?;
+            if sha256_reader(&mut archive)? != expected_sha256 {
+                return Ok(false);
+            }
+            archive.rewind()?;
+            let mut digest = Sha256Writer::default();
+            unpack(format, name, archive, &mut digest)
+                .with_context(|| format!("failed to unpack {}", path.display()))?;
+            Ok(actual == digest.finish())
+        }
+    }
+}
 
-    Ok(installed_sha256.trim() == expected_sha256)
+fn checksum_matches(stamp: &Path, expected_sha256: &str) -> Result<bool> {
+    Ok(read_checksum(stamp)?.is_some_and(|checksum| checksum.trim() == expected_sha256))
+}
+
+fn read_checksum(stamp: &Path) -> Result<Option<String>> {
+    if cached_file_metadata(stamp)?.is_none() {
+        return Ok(None);
+    }
+    match fs::read_to_string(stamp) {
+        Ok(checksum) => Ok(Some(checksum)),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::InvalidData
+            ) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error).with_context(|| format!("failed to read {}", stamp.display())),
+    }
 }
 
 const MAX_DECOMPRESSED_BYTES: u64 = 512 * 1024 * 1024;
@@ -513,7 +758,7 @@ fn select_tar_entry(source: impl Read, name: &str, max_bytes: u64) -> Result<usi
 fn link_tool(root: &Path, name: &str, version: &str) -> Result<()> {
     let bin_directory = root.join(TOOLS_DIR).join(".bin");
 
-    fs::create_dir_all(&bin_directory).context("failed to create .tools/.bin")?;
+    create_cache_directory(&bin_directory)?;
 
     let link = bin_directory.join(name);
     let target = Path::new("..").join(name).join(version).join(name);
@@ -533,7 +778,7 @@ fn link_tool(root: &Path, name: &str, version: &str) -> Result<()> {
 mod tests {
     use super::*;
     use crate::{
-        domain::lockfile::{ChecksumSource, LockedArtifact, LockedTool},
+        domain::lockfile::ChecksumSource,
         http_fixture::{Response, Server},
     };
     use flate2::{Compression, write::GzEncoder};
@@ -983,24 +1228,36 @@ source = "github:owner/tool"
     }
 
     #[test]
-    fn reuses_cache_only_with_matching_checksum_stamp() {
+    fn reuses_cache_only_with_matching_artifact_and_executable_stamps() {
         let directory = tempfile::tempdir().unwrap();
         let destination = directory.path().join("tool");
         let checksum_stamp = directory.path().join(".artifact-sha256");
+        let executable_stamp = directory.path().join(EXECUTABLE_SHA256);
+        let cached = || {
+            cached_executable_matches(&destination, &checksum_stamp, "expected", None, "tool")
+                .unwrap()
+        };
 
-        assert!(!cached_artifact_matches(&destination, &checksum_stamp, "expected").unwrap());
+        assert!(!cached());
 
-        std::fs::write(&destination, "binary").unwrap();
+        fs::write(&destination, "binary").unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(&destination, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(&executable_stamp, checksum(b"binary")).unwrap();
+        assert!(!cached());
 
-        assert!(!cached_artifact_matches(&destination, &checksum_stamp, "expected").unwrap());
+        fs::write(&checksum_stamp, "different\n").unwrap();
+        assert!(!cached());
 
-        std::fs::write(&checksum_stamp, "different\n").unwrap();
+        fs::write(&checksum_stamp, "expected\n").unwrap();
+        assert!(cached());
 
-        assert!(!cached_artifact_matches(&destination, &checksum_stamp, "expected").unwrap());
+        fs::write(&destination, "modified binary").unwrap();
+        assert!(!cached());
 
-        std::fs::write(&checksum_stamp, "expected\n").unwrap();
-
-        assert!(cached_artifact_matches(&destination, &checksum_stamp, "expected").unwrap());
+        fs::write(&destination, "binary").unwrap();
+        fs::remove_file(&executable_stamp).unwrap();
+        assert!(!cached());
     }
 
     #[test]
@@ -1030,6 +1287,15 @@ source = "github:owner/tool"
                 .unwrap(),
             format!("{}\n", checksum(binary))
         );
+        assert_eq!(
+            fs::read_to_string(
+                directory
+                    .path()
+                    .join(".tools/tool/1.0.0/.executable-sha256")
+            )
+            .unwrap(),
+            format!("{}\n", checksum(binary))
+        );
         assert!(directory.path().join(".tools/.bin/tool").exists());
         assert_eq!(server.requests()[0].path, "/tool");
     }
@@ -1051,7 +1317,7 @@ source = "github:owner/tool"
         let client = download::client();
         let error = install_from(directory.path(), &client).unwrap_err();
 
-        assert!(error.to_string().contains("checksum mismatch for tool"));
+        assert!(format!("{error:#}").contains("checksum mismatch for tool"));
         assert!(!directory.path().join(".tools/tool/1.0.0/tool").exists());
     }
 
@@ -1089,6 +1355,36 @@ source = "github:owner/tool"
             format!("{}\n", checksum(binary))
         );
         assert_eq!(server.requests().len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn switching_sources_at_the_same_version_invalidates_the_previous_stamp() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("tool");
+        let staged = directory.path().join("staged");
+        let artifact_stamp = directory.path().join(".artifact-sha256");
+        let crate_stamp = directory.path().join(".crate-sha256");
+        let artifact_sha = checksum(b"artifact");
+        let crate_sha = checksum(b"crate");
+
+        for (current_stamp, sha, previous_stamp) in [
+            (&artifact_stamp, &artifact_sha, &crate_stamp),
+            (&crate_stamp, &crate_sha, &artifact_stamp),
+            (&artifact_stamp, &artifact_sha, &crate_stamp),
+        ] {
+            let retained = directory.path().join(RETAINED_ARTIFACT);
+            fs::write(&retained, b"previous archive").unwrap();
+            fs::write(&staged, sha).unwrap();
+            fs::set_permissions(&staged, fs::Permissions::from_mode(0o755)).unwrap();
+            persist_executable(&staged, &destination, current_stamp, sha, None).unwrap();
+
+            assert!(
+                cached_executable_matches(&destination, current_stamp, sha, None, "tool").unwrap()
+            );
+            assert!(!retained.exists());
+            assert!(!previous_stamp.exists(), "{}", previous_stamp.display());
+        }
     }
 
     #[cfg(unix)]

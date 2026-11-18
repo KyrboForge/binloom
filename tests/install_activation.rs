@@ -8,7 +8,7 @@ fn project(root: &std::path::Path) {
         "linux"
     };
     let arch = std::env::consts::ARCH;
-    let sha = "0".repeat(64);
+    let sha = "306c6ca7407560340797866e077e053627ad409277d1b9da58106fce4cf717cb";
     let mut lock = "lock-version = 1\n".to_string();
     for (section, name) in [("binloom", "binloom"), ("tools.tool", "tool")] {
         lock.push_str(&format!("[{section}]\nversion = '1.0.0'\nsource = 'github:owner/{name}'\ntag = 'v1.0.0'\n[{section}.artifacts.{os}-{arch}]\nasset = '{name}'\nurl = 'https://example.invalid/{name}'\nsha256 = '{sha}'\nformat = 'raw'\n"));
@@ -16,7 +16,10 @@ fn project(root: &std::path::Path) {
         fs::create_dir_all(&directory).unwrap();
         fs::write(directory.join(name), "#!/bin/sh\nexit 0\n").unwrap();
         fs::set_permissions(directory.join(name), fs::Permissions::from_mode(0o755)).unwrap();
-        fs::write(directory.join(".artifact-sha256"), &sha).unwrap();
+        fs::write(directory.join(".artifact-sha256"), sha).unwrap();
+        if name == "tool" {
+            fs::write(directory.join(".executable-sha256"), sha).unwrap();
+        }
     }
     fs::write(root.join("binloom.lock"), lock).unwrap();
 }
