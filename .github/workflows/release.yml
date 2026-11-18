@@ -60,13 +60,18 @@ jobs:
           fi
 
           release_tag="v${RELEASE_VERSION}"
+          resuming=false
           if git rev-parse --verify --quiet "refs/tags/${release_tag}" >/dev/null; then
-            echo "tag ${release_tag} already exists" >&2
-            exit 1
+            git switch --detach "refs/tags/${release_tag}"
+            resuming=true
           fi
 
           current_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
           if [ "$current_version" != "$RELEASE_VERSION" ]; then
+            if [ "$resuming" = true ]; then
+              echo "tag ${release_tag} has Cargo.toml version '${current_version}', expected '${RELEASE_VERSION}'" >&2
+              exit 1
+            fi
             perl -0pi -e 's/^version = "[^"]+"/version = "$ENV{RELEASE_VERSION}"/m' Cargo.toml
             cargo check
           fi
@@ -75,7 +80,7 @@ jobs:
           test "$manifest_version" = "$RELEASE_VERSION"
           cargo test --all-targets --locked
 
-          if ! git diff --quiet -- Cargo.toml Cargo.lock; then
+          if [ "$resuming" = false ] && ! git diff --quiet -- Cargo.toml Cargo.lock; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add Cargo.toml Cargo.lock
@@ -96,12 +101,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-14
+          - runner: macos-latest # macos-14 was retired.
             target: aarch64-apple-darwin
             builder: cargo
             asset: binloom_macos_aarch64
 
-          - runner: macos-14
+          - runner: macos-latest
             target: x86_64-apple-darwin
             builder: cargo
             asset: binloom_macos_x86_64
