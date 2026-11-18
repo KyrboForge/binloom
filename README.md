@@ -106,10 +106,15 @@ Contributors only need the committed files:
 `binloomw` downloads the Binloom version pinned for the current platform,
 verifies its SHA-256 checksum, caches it under
 `.tools/binloom/<version>/binloom`, and forwards the command. No global
-installation or shell setup is required.
+installation or shell setup is required. The cached binary is re-verified
+against `binloom.lock` on every run, not just when a marker file matches.
 
 When a command names a declared tool, `binloomw exec` installs its pinned
-version on first use and verifies the cached executable on later runs.
+version on first use and re-hashes the cached executable (and its retained
+archive) on later runs, repairing a modified or non-executable cache and
+failing closed if it cannot. An intact cache works offline. See
+[Cache verification](docs/design.md#cache-verification) for the guarantees and
+limits.
 `binloomw install` installs all declared tools. Both put executables under
 `.tools/<tool>/<version>/` and link them into `.tools/.bin`. To use that path
 for a single shell command:
@@ -281,7 +286,9 @@ asset = "cargo-nextest-{version}-{target}.tar.gz"
 Cargo sources download a versioned `.crate` archive from crates.io, verify its
 SHA-256 checksum, and compile it locally with `cargo install --locked`. They
 require both `cargo` and `rustc`, and the package must install a binary matching
-the configured tool name:
+the configured tool name. The checksum identifies the source archive, not the
+compiled bytes, so a locally built binary is only checked against the digest
+recorded at build time (corruption detection, not authenticity):
 
 ```toml
 [tools.cargo-nextest]

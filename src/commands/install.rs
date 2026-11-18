@@ -11,9 +11,13 @@ use crate::{
 };
 use anyhow::{Context, Result, bail, ensure};
 use flate2::read::GzDecoder;
+use rustix::{
+    fs::{Access, AtFlags, CWD, Mode, OFlags, accessat},
+    io::Errno,
+    process::geteuid,
+};
 use sha2::{Digest, Sha256};
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::{
     fs,
     io::{self, Read, Seek, Write},
@@ -87,7 +91,7 @@ pub(super) fn install_from(root: &Path, client: &download::Client) -> Result<()>
     let platform_key = platform.to_string();
 
     for (name, tool) in &lockfile.tools {
-        ensure_tool_installed(
+        let _lock = ensure_tool_installed(
             root,
             name,
             tool,
@@ -101,11 +105,15 @@ pub(super) fn install_from(root: &Path, client: &download::Client) -> Result<()>
         let directory = root.join(TOOLS_DIR).join("binloom").join(&binloom.version);
         let cached = directory.join("binloom");
         let matches = match binloom.artifacts.get(&platform_key) {
-            // The POSIX wrapper owns the Binloom bootstrap cache and its stamp format.
-            Some(artifact) => {
-                cached.is_file()
-                    && checksum_matches(&directory.join(ARTIFACT_SHA256), &artifact.sha256)?
-            }
+            // The POSIX wrapper writes the Binloom bootstrap cache; its marker alone is not
+            // trusted, so the executable is verified like any other locked artifact.
+            Some(artifact) => cached_executable_matches(
+                &cached,
+                &directory.join(ARTIFACT_SHA256),
+                &artifact.sha256,
+                Some(artifact.format),
+                "binloom",
+            )?,
             None => false,
         };
         if matches {
@@ -149,11 +157,11 @@ pub(super) fn ensure_tool_installed(
     platform_key: &str,
     client: &download::Client,
     output: InstallOutput,
-) -> Result<()> {
+) -> Result<fs::File> {
     let source = Source::try_from(tool.source.clone()).map_err(anyhow::Error::msg)?;
     let version = &tool.version;
 
-    let cached = match source {
+    let (cached, lock) = match source {
         Source::Cargo(source) => {
             let sha256 = tool
                 .sha256
@@ -200,7 +208,7 @@ pub(super) fn ensure_tool_installed(
         (InstallOutput::Stderr, false) => eprintln!("Installed {name} {version}"),
         (InstallOutput::Stderr, true) => {}
     }
-    Ok(())
+    Ok(lock)
 }
 
 fn ensure_cached(
@@ -211,7 +219,7 @@ fn ensure_cached(
     expected_sha256: &str,
     format: Option<ArtifactFormat>,
     install: impl FnOnce(&Path, &Path, &Path) -> Result<()>,
-) -> Result<bool> {
+) -> Result<(bool, fs::File)> {
     let tools_directory = root.join(TOOLS_DIR);
     let tool_directory = tools_directory.join(name);
     let directory = tool_directory.join(version);
@@ -219,23 +227,8 @@ fn ensure_cached(
     for path in [&tools_directory, &tool_directory, &directory] {
         create_cache_directory(path)?;
     }
-    let lock_path = directory.join(".install.lock");
-    check_cache_type(&lock_path, fs::Metadata::is_file)?;
-    let lock = fs::OpenOptions::new()
-        // On macOS and Linux, opening both ends of a FIFO does not wait for a peer.
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&lock_path)
-        .with_context(|| format!("failed to open {}", lock_path.display()))?;
-    ensure!(
-        lock.metadata()?.is_file(),
-        "expected regular file at {}",
-        lock_path.display()
-    );
-    lock.lock()
-        .with_context(|| format!("failed to lock {}", lock_path.display()))?;
+    let lock = acquire_install_lock(&directory.join(".install.lock"))?;
+    remove_abandoned_temporaries(&directory)?;
 
     let destination = directory.join(name);
     let checksum_stamp = directory.join(checksum_file);
@@ -245,9 +238,97 @@ fn ensure_cached(
         install(&directory, &destination, &checksum_stamp).with_context(|| {
             format!("failed to install tool {name} at {}", destination.display())
         })?;
+        let (executable, metadata) = open_cached(&destination)?
+            .with_context(|| format!("{} disappeared after install", destination.display()))?;
+        ensure!(
+            executable_by_caller(&executable, &metadata, &destination)?,
+            "{} (mode {:o}) is not executable by the current user; check the filesystem's noexec mount option and ACLs",
+            destination.display(),
+            metadata.mode() & 0o7777
+        );
     }
     link_tool(root, name, version)?;
-    Ok(cached)
+    Ok((cached, lock))
+}
+
+const LOCK_ATTEMPTS: usize = 5;
+
+/// Holders of the returned descriptor exclude every other Binloom writer of the version
+/// directory. The descriptor is close-on-exec, so `exec` keeps it until `execve`.
+fn acquire_install_lock(path: &Path) -> Result<fs::File> {
+    for _ in 0..LOCK_ATTEMPTS {
+        check_cache_type(path, fs::Metadata::is_file)?;
+        // O_NOFOLLOW closes the check-then-open race; O_NONBLOCK keeps a FIFO from waiting.
+        let lock = rustix::fs::open(
+            path,
+            OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::from_raw_mode(0o644),
+        )
+        .map(fs::File::from)
+        .map_err(io::Error::from)
+        .with_context(|| format!("failed to open {}", path.display()))?;
+        let locked = lock.metadata()?;
+        ensure!(
+            locked.is_file(),
+            "expected regular file at {}",
+            path.display()
+        );
+        lock.lock()
+            .with_context(|| format!("failed to lock {}", path.display()))?;
+        // A lock on an unlinked or replaced inode would not exclude a holder of the new one.
+        if path
+            .symlink_metadata()
+            .is_ok_and(|current| current.dev() == locked.dev() && current.ino() == locked.ino())
+        {
+            return Ok(lock);
+        }
+    }
+    bail!(
+        "{} kept being replaced while acquiring the install lock",
+        path.display()
+    )
+}
+
+const TEMP_PREFIX: &str = ".binloom-tmp.";
+
+fn temporary_file(directory: &Path) -> io::Result<tempfile::NamedTempFile> {
+    tempfile::Builder::new()
+        .prefix(TEMP_PREFIX)
+        .tempfile_in(directory)
+}
+
+fn temporary_directory(directory: &Path) -> io::Result<tempfile::TempDir> {
+    tempfile::Builder::new()
+        .prefix(TEMP_PREFIX)
+        .tempdir_in(directory)
+}
+
+/// Removes staging files left by killed runs; callers must hold the install lock.
+fn remove_abandoned_temporaries(directory: &Path) -> Result<()> {
+    let entries = fs::read_dir(directory)
+        .with_context(|| format!("failed to read {}", directory.display()))?;
+    for entry in entries {
+        let entry = entry?;
+        if !entry
+            .file_name()
+            .as_encoded_bytes()
+            .starts_with(TEMP_PREFIX.as_bytes())
+        {
+            continue;
+        }
+        let path = entry.path();
+        // DirEntry::file_type does not follow symlinks; remove_dir_all does not either.
+        let file_type = entry.file_type()?;
+        let removed = if file_type.is_file() {
+            fs::remove_file(&path)
+        } else if file_type.is_dir() {
+            fs::remove_dir_all(&path)
+        } else {
+            continue;
+        };
+        removed.with_context(|| format!("failed to remove {}", path.display()))?;
+    }
+    Ok(())
 }
 
 fn create_cache_directory(path: &Path) -> Result<()> {
@@ -279,7 +360,7 @@ fn install_artifact(
     destination: &Path,
     stamp: &Path,
 ) -> Result<()> {
-    let mut downloaded = tempfile::NamedTempFile::new_in(directory)?;
+    let mut downloaded = temporary_file(directory)?;
     let actual_sha256 = download::download_to(client, &artifact.url, &mut downloaded)?;
     ensure!(
         actual_sha256 == artifact.sha256,
@@ -287,7 +368,7 @@ fn install_artifact(
         artifact.sha256
     );
 
-    let mut executable = tempfile::NamedTempFile::new_in(directory)?;
+    let mut executable = temporary_file(directory)?;
     unpack(
         artifact.format,
         name,
@@ -322,14 +403,14 @@ fn install_cargo(
 ) -> Result<tempfile::TempDir> {
     ensure_cargo_toolchain()?;
 
-    let mut archive = tempfile::NamedTempFile::new_in(directory)?;
+    let mut archive = temporary_file(directory)?;
     let actual_sha256 = download::download_to(client, &source.download_url(version), &mut archive)?;
     ensure!(
         actual_sha256 == expected_sha256,
         "checksum mismatch for {name}: expected {expected_sha256}, got {actual_sha256}"
     );
 
-    let extracted = tempfile::tempdir_in(directory)?;
+    let extracted = temporary_directory(directory)?;
     tar::Archive::new(GzDecoder::new(archive.reopen()?))
         .unpack(extracted.path())
         .context("failed to unpack Cargo package")?;
@@ -342,7 +423,7 @@ fn install_cargo(
         "Cargo package archive has no expected Cargo.toml"
     );
 
-    let install_root = tempfile::tempdir_in(directory)?;
+    let install_root = temporary_directory(directory)?;
     let mut command = Command::new("cargo");
     command
         .arg("install")
@@ -388,36 +469,41 @@ fn persist_executable(
     let directory = checksum_stamp
         .parent()
         .context("missing install directory")?;
-    let mut source_checksum = tempfile::NamedTempFile::new_in(directory)?;
-    let mut executable_checksum = tempfile::NamedTempFile::new_in(directory)?;
-    writeln!(source_checksum, "{expected_sha256}")?;
-    writeln!(executable_checksum, "{sha256}")?;
-    source_checksum.as_file().sync_all()?;
-    executable_checksum.as_file().sync_all()?;
-
-    // Invalidate all stamps before replacement so a previous source cannot
-    // validate against the new executable stamp.
-    let retained = directory.join(RETAINED_ARTIFACT);
-    for path in [
-        &executable_stamp,
-        &directory.join(ARTIFACT_SHA256),
-        &directory.join(CRATE_SHA256),
-        &retained,
-    ] {
-        match fs::remove_file(path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(error).with_context(|| format!("failed to remove {}", path.display()));
-            }
-        }
+    // Stage everything before touching the published files, so a failure here keeps the
+    // previous installation intact.
+    let stage = |checksum: &str| -> Result<tempfile::NamedTempFile> {
+        let mut stamp = temporary_file(directory)?;
+        writeln!(stamp, "{checksum}")?;
+        stamp.as_file().sync_all()?;
+        Ok(stamp)
+    };
+    let source_checksum = stage(expected_sha256)?;
+    let executable_checksum = stage(&sha256)?;
+    if let Some(archive) = &archive {
+        archive.as_file().sync_all()?;
     }
+
+    // A stamp left by the other source kind must not vouch for the new executable.
+    let other_stamp = if checksum_stamp.ends_with(ARTIFACT_SHA256) {
+        CRATE_SHA256
+    } else {
+        ARTIFACT_SHA256
+    };
+    remove_if_present(&directory.join(other_stamp))?;
+
+    // Publish the retained archive, then the executable, then the stamps. Verification
+    // recomputes digests and needs the matching stamp, so any interrupted prefix reads as
+    // "not cached" (repaired on the next run) or as the fully verified new executable.
+    let retained = directory.join(RETAINED_ARTIFACT);
+    let has_archive = archive.is_some();
     if let Some(archive) = archive {
         archive
             .persist(&retained)
+            .map_err(|error| error.error)
             .with_context(|| format!("failed to retain {}", retained.display()))?;
     }
-    fs::rename(staged, destination)?;
+    fs::rename(staged, destination)
+        .with_context(|| format!("failed to publish {}", destination.display()))?;
     for (temporary, stamp) in [
         (source_checksum, checksum_stamp),
         (executable_checksum, executable_stamp.as_path()),
@@ -427,8 +513,25 @@ fn persist_executable(
             .map_err(|error| error.error)
             .with_context(|| format!("failed to write {}", stamp.display()))?;
     }
+    if !has_archive {
+        remove_if_present(&retained)?;
+    }
+    sync_directory(directory)
+}
 
-    Ok(())
+fn remove_if_present(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => {
+            Err(error).with_context(|| format!("failed to remove {}", path.display()))
+        }
+        _ => Ok(()),
+    }
+}
+
+fn sync_directory(directory: &Path) -> Result<()> {
+    fs::File::open(directory)
+        .and_then(|directory| directory.sync_all())
+        .with_context(|| format!("failed to sync {}", directory.display()))
 }
 
 #[derive(Default)]
@@ -480,14 +583,43 @@ fn ensure_cargo_toolchain() -> Result<()> {
     Ok(())
 }
 
-fn cached_file_metadata(path: &Path) -> Result<Option<fs::Metadata>> {
-    match path.symlink_metadata() {
-        Ok(metadata) => Ok(metadata.is_file().then_some(metadata)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error).with_context(|| format!("failed to inspect {}", path.display())),
-    }
+/// Opens an existing cache file without following a final symlink or waiting on a FIFO.
+/// Missing, unreadable and non-regular files read as `None`, i.e. "not cached".
+fn open_cached(path: &Path) -> Result<Option<(fs::File, fs::Metadata)>> {
+    let file = match rustix::fs::open(
+        path,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(file) => fs::File::from(file),
+        // Missing, symlink, socket, or unreadable.
+        Err(Errno::NOENT | Errno::LOOP | Errno::NXIO | Errno::OPNOTSUPP | Errno::ACCESS) => {
+            return Ok(None);
+        }
+        Err(error) => {
+            return Err(io::Error::from(error))
+                .with_context(|| format!("failed to open {}", path.display()));
+        }
+    };
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("failed to inspect {}", path.display()))?;
+    Ok(metadata.is_file().then_some((file, metadata)))
 }
 
+/// Trust model: binloom.toml and binloom.lock define the expected artifacts; stamps and other
+/// cache metadata are user-writable and never an authority on their own. A cache hit requires
+/// the stamp to name the locked digest (publication finished) and then recomputes:
+/// - raw: sha256(executable) == locked digest;
+/// - archives (gz included): sha256(.artifact) == locked digest and
+///   sha256(unpack(.artifact)) == sha256(executable);
+/// - Cargo: compiled bytes are not reproducibly identified by the crate digest, so the
+///   recorded `.executable-sha256` only detects accidental corruption or tampering by
+///   someone who cannot also rewrite the stamps. It is not an authenticity guarantee; on
+///   mismatch the tool is rebuilt from the checksum-verified crate source, which needs cargo.
+///
+/// Executables owned by another user (root excepted) or writable by group/others are
+/// replaced. A verified executable the caller cannot execute is repaired in place when owned.
 fn cached_executable_matches(
     destination: &Path,
     checksum_stamp: &Path,
@@ -495,37 +627,27 @@ fn cached_executable_matches(
     format: Option<ArtifactFormat>,
     name: &str,
 ) -> Result<bool> {
-    let Some(metadata) = cached_file_metadata(destination)? else {
-        return Ok(false);
-    };
-    #[cfg(unix)]
-    if metadata.permissions().mode() & 0o111 == 0 {
-        return Ok(false);
-    }
     if !checksum_matches(checksum_stamp, expected_sha256)? {
         return Ok(false);
     }
-
-    let executable_stamp = checksum_stamp.with_file_name(EXECUTABLE_SHA256);
-    let Some(expected) = read_checksum(&executable_stamp)? else {
+    let Some((mut executable, metadata)) = open_cached(destination)? else {
         return Ok(false);
     };
-    let actual = fs::File::open(destination)
-        .and_then(sha256_reader)
-        .with_context(|| format!("failed to hash {}", destination.display()))?;
-    if actual != expected.trim() {
+    let owner = metadata.uid();
+    if (owner != geteuid().as_raw() && owner != 0) || metadata.mode() & 0o022 != 0 {
         return Ok(false);
     }
-    match format {
-        None => Ok(true), // Cargo builds use their locally recorded executable digest.
-        Some(ArtifactFormat::Raw) => Ok(actual == expected_sha256),
+    let actual = sha256_reader(&mut executable)
+        .with_context(|| format!("failed to hash {}", destination.display()))?;
+    let verified = match format {
+        None => read_checksum(&checksum_stamp.with_file_name(EXECUTABLE_SHA256))?
+            .is_some_and(|expected| expected.trim() == actual),
+        Some(ArtifactFormat::Raw) => actual == expected_sha256,
         Some(format) => {
             let path = checksum_stamp.with_file_name(RETAINED_ARTIFACT);
-            if cached_file_metadata(&path)?.is_none() {
+            let Some((mut archive, _)) = open_cached(&path)? else {
                 return Ok(false);
-            }
-            let mut archive = fs::File::open(&path)
-                .with_context(|| format!("failed to open {}", path.display()))?;
+            };
             if sha256_reader(&mut archive)? != expected_sha256 {
                 return Ok(false);
             }
@@ -533,9 +655,32 @@ fn cached_executable_matches(
             let mut digest = Sha256Writer::default();
             unpack(format, name, archive, &mut digest)
                 .with_context(|| format!("failed to unpack {}", path.display()))?;
-            Ok(actual == digest.finish())
+            actual == digest.finish()
         }
+    };
+    Ok(verified && executable_by_caller(&executable, &metadata, destination)?)
+}
+
+/// Asks the kernel whether the effective uid/gid may execute `path` (owner, group, other
+/// and ACLs), adding the owner execute bit through the open descriptor when we own it.
+fn executable_by_caller(file: &fs::File, metadata: &fs::Metadata, path: &Path) -> Result<bool> {
+    let check = || match accessat(CWD, path, Access::EXEC_OK, AtFlags::EACCESS) {
+        Ok(()) => Ok(true),
+        Err(Errno::ACCESS) => Ok(false),
+        Err(error) => Err(io::Error::from(error))
+            .with_context(|| format!("failed to check access to {}", path.display())),
+    };
+    if check()? {
+        return Ok(true);
     }
+    if metadata.uid() != geteuid().as_raw() {
+        return Ok(false);
+    }
+    file.set_permissions(fs::Permissions::from_mode(
+        (metadata.mode() & 0o755) | 0o100,
+    ))
+    .with_context(|| format!("failed to make {} executable", path.display()))?;
+    check()
 }
 
 fn checksum_matches(stamp: &Path, expected_sha256: &str) -> Result<bool> {
@@ -543,19 +688,13 @@ fn checksum_matches(stamp: &Path, expected_sha256: &str) -> Result<bool> {
 }
 
 fn read_checksum(stamp: &Path) -> Result<Option<String>> {
-    if cached_file_metadata(stamp)?.is_none() {
+    let Some((mut file, _)) = open_cached(stamp)? else {
         return Ok(None);
-    }
-    match fs::read_to_string(stamp) {
-        Ok(checksum) => Ok(Some(checksum)),
-        Err(error)
-            if matches!(
-                error.kind(),
-                io::ErrorKind::NotFound | io::ErrorKind::InvalidData
-            ) =>
-        {
-            Ok(None)
-        }
+    };
+    let mut checksum = String::new();
+    match file.read_to_string(&mut checksum) {
+        Ok(_) => Ok(Some(checksum)),
+        Err(error) if error.kind() == io::ErrorKind::InvalidData => Ok(None),
         Err(error) => Err(error).with_context(|| format!("failed to read {}", stamp.display())),
     }
 }
@@ -771,7 +910,8 @@ fn link_tool(root: &Path, name: &str, version: &str) -> Result<()> {
         .with_context(|| format!("failed to create temporary link for {name}"))?;
 
     fs::rename(&temporary_link, &link)
-        .with_context(|| format!("failed to replace {}", link.display()))
+        .with_context(|| format!("failed to replace {}", link.display()))?;
+    sync_directory(&bin_directory)
 }
 
 #[cfg(test)]

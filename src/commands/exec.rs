@@ -43,9 +43,12 @@ pub(crate) fn exec(arguments: &[OsString]) -> Result<()> {
     }
     let path = env::join_paths(paths).context("failed to construct PATH")?;
 
+    // The install lock is close-on-exec and held until `execve`, so no Binloom process can
+    // replace the verified executable in between. A same-user process that writes the file
+    // in place after hashing is not excluded; closing that needs sealing or supervision.
     let installed = ensure_managed_tool(root, name)?;
     let mut command = match &installed {
-        Some(executable) => Command::new(executable),
+        Some((executable, _lock)) => Command::new(executable),
         None => Command::new(program),
     };
     #[cfg(unix)]
@@ -120,7 +123,7 @@ fn matching_tool_name(path: &Path, name: Option<&str>) -> Result<Option<String>>
         .cloned())
 }
 
-fn ensure_managed_tool(root: &Path, name: Option<&str>) -> Result<Option<PathBuf>> {
+fn ensure_managed_tool(root: &Path, name: Option<&str>) -> Result<Option<(PathBuf, fs::File)>> {
     let matches = [
         matching_tool_name(&root.join(MANIFEST), name)?,
         matching_tool_name(&root.join(LOCKFILE), name)?,
@@ -146,7 +149,7 @@ fn ensure_managed_tool(root: &Path, name: Option<&str>) -> Result<Option<PathBuf
         .get(name)
         .with_context(|| format!("missing lock entry for {name}; run `binloom update`"))?;
 
-    ensure_tool_installed(
+    let lock = ensure_tool_installed(
         root,
         name,
         tool,
@@ -155,10 +158,11 @@ fn ensure_managed_tool(root: &Path, name: Option<&str>) -> Result<Option<PathBuf
         InstallOutput::Stderr,
     )?;
 
-    Ok(Some(
+    Ok(Some((
         root.join(TOOLS_DIR)
             .join(name)
             .join(&tool.version)
             .join(name),
-    ))
+        lock,
+    )))
 }

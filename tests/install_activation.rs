@@ -1,3 +1,4 @@
+use sha2::Digest;
 use std::{fs, os::unix::fs::PermissionsExt, process::Command};
 
 fn project(root: &std::path::Path) {
@@ -203,4 +204,80 @@ fn stale_activated_binloom_requires_wrapper() {
         .unwrap();
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("./binloomw install"));
+}
+
+fn checksum(bytes: &[u8]) -> String {
+    sha2::Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn install(root: &std::path::Path) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_binloom"))
+        .arg("install")
+        .env("HOME", root)
+        .env("XDG_CONFIG_HOME", root.join(".config"))
+        .current_dir(root)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn install_skips_linking_a_tampered_binloom_despite_matching_stamps() {
+    let home = tempfile::tempdir().unwrap();
+    project(home.path());
+    let directory = home.path().join(".tools/binloom/1.0.0");
+    let tampered = "#!/bin/sh\nexit 1\n";
+    fs::write(directory.join("binloom"), tampered).unwrap();
+    // Stamps are rewritable by whoever tampered with the binary, so they prove nothing.
+    fs::write(
+        directory.join(".executable-sha256"),
+        checksum(tampered.as_bytes()),
+    )
+    .unwrap();
+    let output = install(home.path());
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("binloomw install"));
+    assert!(!home.path().join(".tools/.bin/binloom").exists());
+}
+
+#[test]
+fn install_links_a_gz_binloom_only_while_its_retained_archive_verifies() {
+    use flate2::{Compression, write::GzEncoder};
+    use std::io::Write;
+
+    let home = tempfile::tempdir().unwrap();
+    project(home.path());
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+    encoder.write_all(b"#!/bin/sh\nexit 0\n").unwrap();
+    let archive = encoder.finish().unwrap();
+    let archive_sha = checksum(&archive);
+    let raw_sha = "306c6ca7407560340797866e077e053627ad409277d1b9da58106fce4cf717cb";
+    let lock_path = home.path().join("binloom.lock");
+    let lock = fs::read_to_string(&lock_path)
+        .unwrap()
+        .replacen(raw_sha, &archive_sha, 1)
+        .replacen("format = 'raw'", "format = 'gz'", 1);
+    fs::write(&lock_path, lock).unwrap();
+    let directory = home.path().join(".tools/binloom/1.0.0");
+    fs::write(directory.join(".artifact"), &archive).unwrap();
+    fs::write(directory.join(".artifact-sha256"), &archive_sha).unwrap();
+
+    let output = install(home.path());
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let link = home.path().join(".tools/.bin/binloom");
+    assert!(link.symlink_metadata().is_ok());
+
+    let mut corrupted = archive;
+    corrupted[4] ^= 1;
+    fs::write(directory.join(".artifact"), corrupted).unwrap();
+    let output = install(home.path());
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("binloomw install"));
+    assert!(link.symlink_metadata().is_err());
 }
