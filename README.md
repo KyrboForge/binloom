@@ -100,7 +100,6 @@ git add binloomw binloom.toml binloom.lock .gitignore
 Contributors only need the committed files:
 
 ```sh
-./binloomw install
 ./binloomw exec lefthook -- run pre-commit
 ```
 
@@ -109,9 +108,11 @@ verifies its SHA-256 checksum, caches it under
 `.tools/binloom/<version>/binloom`, and forwards the command. No global
 installation or shell setup is required.
 
-Managed tools are installed under `.tools/<tool>/<version>/` and linked into
-`.tools/.bin`. Use them through `binloomw exec`, or add the printed path for a
-single shell command:
+When a command names a declared tool, `binloomw exec` installs its pinned
+version on first use and verifies the cached executable on later runs.
+`binloomw install` installs all declared tools. Both put executables under
+`.tools/<tool>/<version>/` and link them into `.tools/.bin`. To use that path
+for a single shell command:
 
 ```sh
 PATH="$(./binloomw path):$PATH" lefthook version
@@ -308,7 +309,7 @@ minimum-release-age-minutes = 1440
 | `binloom install` | Install every locked tool; reconstruct the lockfile from manifest pins when it is missing |
 | `binloom update [tool]` | Update one tool, or all tools and Binloom when omitted |
 | `binloom update --self` | Update only Binloom and its wrapper metadata |
-| `binloom exec <command> [args...]` | Run with `.tools/.bin` prepended to `PATH` |
+| `binloom exec <command> [args...]` | Install the requested declared tool on demand and run with `.tools/.bin` prepended to `PATH` |
 | `binloom list` | List configured tools and versions |
 | `binloom path` | Print the absolute `.tools/.bin` path |
 | `binloom env --shell <bash\|zsh\|fish>` | Print commands for manual PATH activation |

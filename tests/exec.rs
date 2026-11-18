@@ -31,4 +31,20 @@ fn prepends_project_tools_to_path_and_preserves_exit_code() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(!directory.path().join(".tools").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn unmanaged_command_outside_a_project_still_fails() {
+    let directory = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_binloom"))
+        .args(["exec", "sh", "-c", "exit 0"])
+        .current_dir(directory.path())
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("binloom.toml not found"));
+    assert!(!directory.path().join(".tools").exists());
 }

@@ -17,6 +17,13 @@ fn project(root: &std::path::Path) {
         fs::write(directory.join(name), "#!/bin/sh\nexit 0\n").unwrap();
         fs::set_permissions(directory.join(name), fs::Permissions::from_mode(0o755)).unwrap();
         fs::write(directory.join(".artifact-sha256"), &sha).unwrap();
+        if name == "tool" {
+            fs::write(
+                directory.join(".executable-sha256"),
+                "306c6ca7407560340797866e077e053627ad409277d1b9da58106fce4cf717cb",
+            )
+            .unwrap();
+        }
     }
     fs::write(root.join("binloom.lock"), lock).unwrap();
 }
