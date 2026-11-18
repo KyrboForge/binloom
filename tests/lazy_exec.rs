@@ -14,7 +14,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 const TOOL: &str = "lazy-test-tool";
@@ -269,6 +269,129 @@ fn missing_or_inconsistent_project_metadata_blocks_a_declared_tool() {
         }
     }
     assert_eq!(server.shutdown(), 0);
+}
+
+#[test]
+fn invalid_manifest_entry_without_a_locked_tool_blocks_path_fallback() {
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path();
+    fs::write(
+        root.join("binloom.toml"),
+        format!("manifest-version = 1\n[binloom]\nversion = '1.0.0'\n[tools.{TOOL}]\nversion = 'v1.0.0'\nsource = 'github:owner/tool'\n"),
+    )
+    .unwrap();
+    let impostor = root.join(TOOL);
+    fs::write(&impostor, b"#!/bin/sh\necho impostor\n").unwrap();
+    fs::set_permissions(impostor, fs::Permissions::from_mode(0o755)).unwrap();
+    for lock in [None, Some("invalid TOML"), Some("lock-version = 1\n")] {
+        if let Some(lock) = lock {
+            fs::write(root.join("binloom.lock"), lock).unwrap();
+        }
+        let output = cli(root)
+            .env("PATH", root)
+            .args(["exec", TOOL])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(
+            stderr(&output).contains("must be written as 1.0.0"),
+            "{}",
+            stderr(&output)
+        );
+    }
+}
+
+#[test]
+fn case_variant_of_managed_tool_reports_canonical_command() {
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path();
+    let server = Server::start(SCRIPT, Duration::ZERO);
+    raw_project(root, &server);
+    let variant = TOOL.to_ascii_uppercase();
+    let bin = root.join(".tools/.bin");
+    fs::create_dir_all(&bin).unwrap();
+    let impostor = bin.join(&variant);
+    fs::write(&impostor, b"#!/bin/sh\necho impostor\n").unwrap();
+    fs::set_permissions(impostor, fs::Permissions::from_mode(0o755)).unwrap();
+    let output = cli(root).args(["exec", &variant]).output().unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let error = stderr(&output);
+    assert!(
+        error.contains(&variant) && error.contains(&format!("binloomw exec {TOOL}")),
+        "{error}"
+    );
+    assert_eq!(server.shutdown(), 0);
+}
+
+#[test]
+fn fifo_install_lock_fails_promptly() {
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path();
+    let server = Server::start(SCRIPT, Duration::ZERO);
+    raw_project(root, &server);
+    fs::create_dir_all(version_dir(root)).unwrap();
+    let lock = version_dir(root).join(".install.lock");
+    assert!(
+        Command::new("mkfifo")
+            .arg(&lock)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let mut child = cli(root)
+        .args(["exec", TOOL])
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("exec blocked opening a FIFO at .install.lock");
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains(".install.lock"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(server.shutdown(), 0);
+}
+
+#[test]
+fn raw_executable_with_rewritten_stamp_must_match_locked_digest() {
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path();
+    let server = Server::start(SCRIPT, Duration::ZERO);
+    raw_project(root, &server);
+    assert_ran_tool(exec_tool(root));
+    let tamper = || {
+        let bytes = b"#!/bin/sh\necho impostor\n";
+        fs::write(version_dir(root).join(TOOL), bytes).unwrap();
+        fs::write(
+            version_dir(root).join(".executable-sha256"),
+            checksum(bytes),
+        )
+        .unwrap();
+    };
+    tamper();
+    assert_ran_tool(exec_tool(root));
+    assert_eq!(server.shutdown(), 2);
+    tamper();
+    let output = exec_tool(root);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        stderr(&output).contains("failed to install tool"),
+        "{}",
+        stderr(&output)
+    );
 }
 
 #[test]

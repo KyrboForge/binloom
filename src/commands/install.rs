@@ -164,6 +164,7 @@ pub(super) fn ensure_tool_installed(
                 version,
                 CRATE_SHA256,
                 sha256,
+                None,
                 |directory, destination, stamp| {
                     let install_root =
                         install_cargo(directory, name, version, &source, sha256, client, output)?;
@@ -183,6 +184,7 @@ pub(super) fn ensure_tool_installed(
                 version,
                 ARTIFACT_SHA256,
                 &artifact.sha256,
+                matches!(artifact.format, ArtifactFormat::Raw).then_some(artifact.sha256.as_str()),
                 |directory, destination, stamp| {
                     let staged = install_artifact(directory, name, artifact, client)?;
                     persist_executable(staged.path(), destination, stamp, &artifact.sha256)
@@ -207,6 +209,7 @@ fn ensure_cached(
     version: &str,
     checksum_file: &str,
     expected_sha256: &str,
+    expected_executable_sha256: Option<&str>,
     install: impl FnOnce(&Path, &Path, &Path) -> Result<()>,
 ) -> Result<bool> {
     let tools_directory = root.join(TOOLS_DIR);
@@ -217,19 +220,31 @@ fn ensure_cached(
         create_cache_directory(path)?;
     }
     let lock_path = directory.join(".install.lock");
-    reject_symlink(&lock_path)?;
+    check_cache_type(&lock_path, fs::Metadata::is_file)?;
     let lock = fs::OpenOptions::new()
+        // On macOS and Linux, opening both ends of a FIFO does not wait for a peer.
+        .read(true)
         .write(true)
         .create(true)
         .truncate(false)
         .open(&lock_path)
         .with_context(|| format!("failed to open {}", lock_path.display()))?;
+    ensure!(
+        lock.metadata()?.is_file(),
+        "expected regular file at {}",
+        lock_path.display()
+    );
     lock.lock()
         .with_context(|| format!("failed to lock {}", lock_path.display()))?;
 
     let destination = directory.join(name);
     let checksum_stamp = directory.join(checksum_file);
-    let cached = cached_executable_matches(&destination, &checksum_stamp, expected_sha256)?;
+    let cached = cached_executable_matches(
+        &destination,
+        &checksum_stamp,
+        expected_sha256,
+        expected_executable_sha256,
+    )?;
     if !cached {
         install(&directory, &destination, &checksum_stamp).with_context(|| {
             format!("failed to install tool {name} at {}", destination.display())
@@ -241,15 +256,15 @@ fn ensure_cached(
 
 fn create_cache_directory(path: &Path) -> Result<()> {
     let created = fs::create_dir_all(path);
-    reject_symlink(path)?;
+    check_cache_type(path, fs::Metadata::is_dir)?;
     created.with_context(|| format!("failed to create {}", path.display()))
 }
 
-fn reject_symlink(path: &Path) -> Result<()> {
+fn check_cache_type(path: &Path, expected: fn(&fs::Metadata) -> bool) -> Result<()> {
     match path.symlink_metadata() {
         Ok(metadata) => ensure!(
-            !metadata.is_symlink(),
-            "refusing symlink at {}",
+            expected(&metadata),
+            "refusing symlink or unexpected file type at {}",
             path.display()
         ),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -443,6 +458,7 @@ fn cached_executable_matches(
     destination: &Path,
     checksum_stamp: &Path,
     expected_sha256: &str,
+    expected_executable_sha256: Option<&str>,
 ) -> Result<bool> {
     let metadata = match destination.symlink_metadata() {
         Ok(metadata) => metadata,
@@ -470,7 +486,8 @@ fn cached_executable_matches(
     let actual = fs::File::open(destination)
         .and_then(executable_sha256)
         .with_context(|| format!("failed to hash {}", destination.display()))?;
-    Ok(actual == expected.trim())
+    Ok(actual == expected.trim()
+        && expected_executable_sha256.is_none_or(|locked| actual == locked))
 }
 
 fn checksum_matches(stamp: &Path, expected_sha256: &str) -> Result<bool> {
@@ -478,6 +495,12 @@ fn checksum_matches(stamp: &Path, expected_sha256: &str) -> Result<bool> {
 }
 
 fn read_checksum(stamp: &Path) -> Result<Option<String>> {
+    if stamp
+        .symlink_metadata()
+        .is_ok_and(|metadata| !metadata.is_file())
+    {
+        return Ok(None);
+    }
     match fs::read_to_string(stamp) {
         Ok(checksum) => Ok(Some(checksum)),
         Err(error)
@@ -1166,7 +1189,7 @@ source = "github:owner/tool"
         let checksum_stamp = directory.path().join(".artifact-sha256");
         let executable_stamp = directory.path().join(EXECUTABLE_SHA256);
         let cached =
-            || cached_executable_matches(&destination, &checksum_stamp, "expected").unwrap();
+            || cached_executable_matches(&destination, &checksum_stamp, "expected", None).unwrap();
 
         assert!(!cached());
 
@@ -1307,7 +1330,7 @@ source = "github:owner/tool"
             fs::set_permissions(&staged, fs::Permissions::from_mode(0o755)).unwrap();
             persist_executable(&staged, &destination, current_stamp, sha).unwrap();
 
-            assert!(cached_executable_matches(&destination, current_stamp, sha).unwrap());
+            assert!(cached_executable_matches(&destination, current_stamp, sha, None).unwrap());
             assert!(!previous_stamp.exists(), "{}", previous_stamp.display());
         }
     }
