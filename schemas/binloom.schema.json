@@ -11,8 +11,35 @@
       "minItems": 1,
       "uniqueItems": true,
       "items": {
-        "enum": ["macos-aarch64", "macos-x86_64", "linux-aarch64", "linux-x86_64"]
-      }
+        "enum": [
+          "macos-aarch64",
+          "macos-x86_64",
+          "linux-aarch64",
+          "linux-x86_64",
+          "linux-aarch64-gnu",
+          "linux-aarch64-musl",
+          "linux-x86_64-gnu",
+          "linux-x86_64-musl"
+        ]
+      },
+      "allOf": [
+        {
+          "not": {
+            "allOf": [
+              { "contains": { "const": "linux-aarch64" } },
+              { "contains": { "enum": ["linux-aarch64-gnu", "linux-aarch64-musl"] } }
+            ]
+          }
+        },
+        {
+          "not": {
+            "allOf": [
+              { "contains": { "const": "linux-x86_64" } },
+              { "contains": { "enum": ["linux-x86_64-gnu", "linux-x86_64-musl"] } }
+            ]
+          }
+        }
+      ]
     }
   },
   "properties": {

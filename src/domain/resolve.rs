@@ -3,7 +3,7 @@ use crate::domain::lockfile::{
     ArtifactFormat, ChecksumSource, LockedArtifact, LockedTool, LockedWrapper,
 };
 use crate::domain::manifest::Tool;
-use crate::domain::platform::{Platform, contains_token};
+use crate::domain::platform::{Platform, canonical_targets, contains_token};
 use crate::domain::sources::{Source, bare_version, release};
 use crate::download;
 use crate::download::Client;
@@ -145,7 +145,7 @@ fn resolve_release(
     let mut artifacts = BTreeMap::new();
     let mut emitted_warnings = BTreeSet::new();
     let mut selected = Vec::with_capacity(request.targets.len());
-    for &platform in request.targets {
+    for platform in canonical_targets(request.targets)? {
         let asset = match request.asset_pattern {
             Some(pattern) => release.find_asset_by_pattern(pattern, &version, platform)?,
             None => release.find_asset(request.name, platform, &mut emitted_warnings)?,
@@ -193,64 +193,27 @@ fn ensure_platform_specific_assets(
 ) -> anyhow::Result<()> {
     const HINT: &str =
         "use {os}, {arch} or {target} in the asset pattern so every platform locks its own asset";
-    // OSes Binloom cannot target yet; naming one never matches any platform.
-    const UNSUPPORTED_OS_ALIASES: [&str; 3] = ["windows", "win32", "win64"];
-    // Likewise for architectures: `armv7` must never be locked as an x86_64 asset.
-    const UNSUPPORTED_ARCH_ALIASES: [&str; 14] = [
-        "arm", "armv5", "armv6", "armv7", "armv7l", "armhf", "i386", "i686", "386", "ppc64",
-        "ppc64le", "s390x", "riscv64", "mips64",
-    ];
-    // `v1.0.0` must go before `1.0.0`: the `v` would otherwise glue the bare
-    // version to an alphanumeric and keep it visible.
-    let tagged = if version.is_empty() {
-        String::new()
-    } else {
-        format!("v{version}")
-    };
-    let platform_part = |asset: &release::ReleaseAsset| {
-        [tagged.as_str(), version, name]
-            .iter()
-            .filter(|part| !part.is_empty())
-            .fold(asset.name.to_ascii_lowercase(), |rest, part| {
-                blank_token(&rest, &part.to_ascii_lowercase())
-            })
-    };
-
     for (platform, asset) in selected {
-        let platform_part = platform_part(asset);
-        let foreign_os = Platform::ALL.iter().any(|other| {
-            other.os_aliases() != platform.os_aliases() && other.os_in(&platform_part)
-        }) || UNSUPPORTED_OS_ALIASES
-            .iter()
-            .any(|alias| contains_token(&platform_part, alias));
-        let foreign_arch = Platform::ALL.iter().any(|other| {
-            other.arch_aliases() != platform.arch_aliases() && other.arch_in(&platform_part)
-        }) || UNSUPPORTED_ARCH_ALIASES
-            .iter()
-            .any(|alias| contains_token(&platform_part, alias));
-        // Name a whole platform only when both its OS and architecture appear
-        // in the name, so a Linux asset is never blamed on macOS.
-        let foreign = Platform::ALL.iter().find(|other| {
-            other != &platform && other.os_in(&platform_part) && other.arch_in(&platform_part)
-        });
-        let reason = match (foreign, foreign_os, foreign_arch) {
-            (Some(foreign), _, _) => format!("is named for {foreign}"),
-            (None, true, _) => "names a different OS".to_owned(),
-            (None, false, true) => "names a different architecture".to_owned(),
-            (None, false, false) => continue,
-        };
-        bail!(
-            "asset {} selected for {platform} {reason}; {HINT}",
-            asset.name
-        );
+        let part = release::asset_platform_part(&asset.name, name, version, *platform);
+        if let Some(reason) = release::foreign_platform_reason(*platform, &part)
+            .or_else(|| release::linux_abi_rejection(*platform, &part, false).map(str::to_owned))
+        {
+            bail!(
+                "asset {} selected for {platform} {reason}; {HINT}",
+                asset.name
+            );
+        }
     }
 
     for (index, (platform, asset)) in selected.iter().enumerate() {
         for (other, shared) in &selected[index + 1..] {
-            if shared.name != asset.name {
+            if shared.name != asset.name
+                && ((platform.linux_abi().is_none() && other.linux_abi().is_none())
+                    || shared.download_url != asset.download_url)
+            {
                 continue;
             }
-            let shared_part = platform_part(asset);
+            let shared_part = release::asset_platform_part(&asset.name, name, version, *platform);
             let universal_macos = platform.os_aliases() == other.os_aliases()
                 && platform.os_aliases()[0] == "macos"
                 && contains_token(&shared_part, "universal")
@@ -266,28 +229,6 @@ fn ensure_platform_specific_assets(
     }
 
     Ok(())
-}
-
-/// Replaces `token` with `-` wherever it is not glued to ASCII alphanumerics,
-/// so a tool named `x` never blanks the `x` out of `x86_64`.
-fn blank_token(name: &str, token: &str) -> String {
-    let bytes = name.as_bytes();
-    let mut blanked = String::with_capacity(name.len());
-    let mut copied = 0;
-    for (start, _) in name.match_indices(token) {
-        let end = start + token.len();
-        let before = start.checked_sub(1).map(|index| bytes[index]);
-        let after = bytes.get(end).copied();
-        if !before.is_some_and(|byte| byte.is_ascii_alphanumeric())
-            && !after.is_some_and(|byte| byte.is_ascii_alphanumeric())
-        {
-            blanked.push_str(&name[copied..start]);
-            blanked.push('-');
-            copied = end;
-        }
-    }
-    blanked.push_str(&name[copied..]);
-    blanked
 }
 
 fn ensure_minimum_age(
@@ -343,7 +284,7 @@ fn resolve_binloom_release(
             name: "binloom",
             source,
             asset_pattern: None,
-            targets: &Platform::ALL,
+            targets: &Platform::LEGACY_DEFAULT,
         },
         release,
         minimum_age_minutes,
@@ -386,6 +327,184 @@ mod tests {
             download_url: format!("https://example.com/{name}"),
             sha256: None,
         }
+    }
+
+    #[test]
+    fn resolves_each_explicit_abi_with_its_own_digest_in_either_input_order() {
+        use Platform::*;
+        let assets = [
+            ("tool-linux-amd64-glibc", LinuxX86_64Gnu, "a"),
+            ("tool-x86-64-unknown-linux-musl", LinuxX86_64Musl, "b"),
+            ("tool-linux-gnu-arm64", LinuxAarch64Gnu, "c"),
+            ("tool-aarch64-linux-musl", LinuxAarch64Musl, "d"),
+            ("tool-macos-aarch64", MacosAarch64, "e"),
+        ];
+        let source = Source::try_from("github:owner/tool".to_owned()).unwrap();
+        let client = download::client();
+        let mut release = Release {
+            tag: "v1.0.0".to_owned(),
+            published_at: Some("2026-01-01T00:00:00Z".to_owned()),
+            assets: assets
+                .iter()
+                .map(|(name, _, digit)| ReleaseAsset {
+                    sha256: Some(digit.repeat(64)),
+                    ..asset(name)
+                })
+                .collect(),
+        };
+        let mut targets = assets.map(|(_, platform, _)| platform);
+        for _ in 0..2 {
+            let locked = resolve_release(
+                ReleaseRequest {
+                    name: "tool",
+                    source: &source,
+                    asset_pattern: None,
+                    targets: &targets,
+                },
+                &release,
+                0,
+                &client,
+                &mut BTreeMap::new(),
+            )
+            .unwrap();
+            for (name, target, digit) in assets {
+                let entry = &locked.artifacts[&target.to_string()];
+                assert_eq!(entry.asset, name);
+                assert_eq!(entry.sha256, digit.repeat(64));
+                assert_eq!(entry.checksum_source, ChecksumSource::Digest);
+            }
+            assert_eq!(locked.artifacts.len(), assets.len());
+            release.assets.reverse();
+            targets.reverse();
+        }
+    }
+
+    #[test]
+    fn explicit_patterns_expand_rust_triples_and_cannot_share_or_mislabel_assets() {
+        use Platform::*;
+        let source = Source::try_from("github:owner/tool".to_owned()).unwrap();
+        let client = download::client();
+        let release = Release {
+            tag: "v1.0.0".to_owned(),
+            published_at: Some("2026-01-01T00:00:00Z".to_owned()),
+            assets: [
+                "tool-1.0.0-x86_64-unknown-linux-gnu",
+                "tool-1.0.0-x86_64-unknown-linux-musl",
+                "tool-1.0.0-aarch64-unknown-linux-gnu",
+                "tool-1.0.0-aarch64-unknown-linux-musl",
+                "tool-linux-amd64",
+                "tool-linux-amd64-gnu-musl",
+                "tool-linux-arm64",
+                "tool-portable",
+            ]
+            .map(|name| ReleaseAsset {
+                sha256: Some("a".repeat(64)),
+                ..asset(name)
+            })
+            .into(),
+        };
+        let resolve = |pattern, targets| {
+            resolve_release(
+                ReleaseRequest {
+                    name: "tool",
+                    source: &source,
+                    asset_pattern: Some(pattern),
+                    targets,
+                },
+                &release,
+                0,
+                &client,
+                &mut BTreeMap::new(),
+            )
+        };
+        let all = [
+            LinuxX86_64Gnu,
+            LinuxX86_64Musl,
+            LinuxAarch64Gnu,
+            LinuxAarch64Musl,
+        ];
+        let locked = resolve("tool-{version}-{target}", &all).unwrap();
+        for target in all {
+            assert_eq!(
+                locked.artifacts[&target.to_string()].asset,
+                format!("tool-1.0.0-{}", target.rust_target())
+            );
+        }
+        assert!(resolve("tool-linux-amd64", &[LinuxX86_64Gnu]).is_ok());
+        for (pattern, targets, reason) in [
+            (
+                "tool-linux-amd64",
+                &[LinuxX86_64Gnu, LinuxX86_64Musl][..],
+                "selected for both",
+            ),
+            (
+                "tool-portable",
+                &[LinuxAarch64Gnu, LinuxX86_64Gnu][..],
+                "selected for both",
+            ),
+            (
+                "tool-1.0.0-x86_64-unknown-linux-musl",
+                &[LinuxX86_64Gnu][..],
+                "requires GNU",
+            ),
+            (
+                "tool-linux-amd64-gnu-musl",
+                &[LinuxX86_64Gnu][..],
+                "names both",
+            ),
+            (
+                "tool-linux-arm64",
+                &[LinuxX86_64Gnu][..],
+                "is named for linux-aarch64",
+            ),
+        ] {
+            let err = resolve(pattern, targets).unwrap_err().to_string();
+            assert!(
+                err.contains("linux-x86_64-gnu") && err.contains(reason),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn reports_each_rejected_abi_candidate_without_falling_back() {
+        use Platform::*;
+        let mut release = Release {
+            tag: "v1.0.0".to_owned(),
+            published_at: None,
+            assets: [
+                "tool-linux-x86_64-musl",
+                "tool-linux-x86_64-unrelatedgnu",
+                "tool-linux-x86_64",
+                "tool-linux-x86_64-gnu-musl",
+                "tool-linux-aarch64-gnu",
+                "other-linux-x86_64-gnu",
+            ]
+            .map(asset)
+            .into(),
+        };
+        let failure = |release: &Release, platform| {
+            release
+                .find_asset("tool", platform, &mut BTreeSet::new())
+                .unwrap_err()
+                .to_string()
+        };
+        let gnu_error = failure(&release, LinuxX86_64Gnu);
+        for detail in [
+            "for linux-x86_64-gnu",
+            "tool-linux-x86_64-musl (names musl",
+            "tool-linux-x86_64-unrelatedgnu (has no GNU/glibc or musl token)",
+            "tool-linux-x86_64 (has no GNU/glibc or musl token)",
+            "tool-linux-x86_64-gnu-musl (names both",
+            "tool-linux-aarch64-gnu (is named for linux-aarch64)",
+            "other-linux-x86_64-gnu (name does not contain tool)",
+        ] {
+            assert!(gnu_error.contains(detail), "{gnu_error}");
+        }
+        release.assets.reverse();
+        assert_eq!(failure(&release, LinuxX86_64Gnu), gnu_error);
+        release.assets = vec![asset("tool-linux-x86_64-gnu")];
+        assert!(failure(&release, LinuxX86_64Musl).contains("requires musl"));
     }
 
     #[test]
@@ -472,7 +591,7 @@ mod tests {
         for suffix in [
             "", ".gz", ".tar.gz", ".tgz", ".tar.xz", ".zip", ".tar.zst", ".tar.bz2",
         ] {
-            let mut assets: Vec<_> = Platform::ALL
+            let mut assets: Vec<_> = Platform::LEGACY_DEFAULT
                 .iter()
                 .map(|platform| asset(&format!("binloom-{platform}{suffix}")))
                 .collect();
@@ -491,7 +610,7 @@ mod tests {
                     name: "binloom",
                     source: &source,
                     asset_pattern: None,
-                    targets: &Platform::ALL,
+                    targets: &Platform::LEGACY_DEFAULT,
                 },
                 &release,
                 0,
@@ -546,7 +665,7 @@ mod tests {
                 name: "gitleaks",
                 source: &Source::try_from("github:gitleaks/gitleaks".to_owned()).unwrap(),
                 asset_pattern: pattern,
-                targets: &Platform::ALL,
+                targets: &Platform::LEGACY_DEFAULT,
             },
             &gitleaks_release(),
             0,
@@ -652,7 +771,10 @@ mod tests {
     #[test]
     fn rejects_platform_invariant_asset_shared_by_all_platforms() {
         let shared = asset("tool-1.0.0.tar.gz");
-        let selected: Vec<_> = Platform::ALL.iter().map(|p| (*p, &shared)).collect();
+        let selected: Vec<_> = Platform::LEGACY_DEFAULT
+            .iter()
+            .map(|p| (*p, &shared))
+            .collect();
 
         let error = ensure_platform_specific_assets("tool", "1.0.0", &selected)
             .unwrap_err()

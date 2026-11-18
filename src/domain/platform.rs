@@ -2,8 +2,11 @@ use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display};
 
-/// Release target id. Variant order is the canonical target order used for
-/// sorting and serialization; new ids (for example ABI variants) are new variants.
+#[cfg(any(target_os = "linux", test))]
+mod linux;
+
+/// Binloom target id. Keep the four legacy variants in their original order.
+/// Explicit Linux targets follow, with aarch64 before x86_64 and GNU before musl.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(try_from = "String", into = "String")]
 pub(crate) enum Platform {
@@ -11,31 +14,126 @@ pub(crate) enum Platform {
     MacosX86_64,
     LinuxAarch64,
     LinuxX86_64,
+    LinuxAarch64Gnu,
+    LinuxAarch64Musl,
+    LinuxX86_64Gnu,
+    LinuxX86_64Musl,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LinuxAbi {
+    Gnu,
+    Musl,
+}
+
+pub(crate) struct Host<'a> {
+    pub(crate) os: &'a str,
+    pub(crate) arch: &'a str,
+}
+
+impl Host<'_> {
+    pub(crate) fn current_target(targets: &[Platform]) -> Result<Platform> {
+        Self {
+            os: std::env::consts::OS,
+            arch: std::env::consts::ARCH,
+        }
+        .target(targets, || {
+            #[cfg(target_os = "linux")]
+            {
+                linux::detect_libc()
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                None
+            }
+        })
+    }
+
+    /// Match a host using injected libc evidence. Legacy targets need only OS and CPU.
+    pub(crate) fn target(
+        &self,
+        targets: &[Platform],
+        libc: impl FnOnce() -> Option<LinuxAbi>,
+    ) -> Result<Platform> {
+        let legacy = Platform::try_from((self.os, self.arch))?;
+        let host = if !targets.contains(&legacy)
+            && targets
+                .iter()
+                .any(|target| target.base_platform() == legacy)
+        {
+            let abi = libc().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "could not determine libc for {legacy}; see the Linux target docs or declare `{legacy}` and run `binloom update` to use legacy matching"
+                )
+            })?;
+            match (legacy, abi) {
+                (Platform::LinuxAarch64, LinuxAbi::Gnu) => Platform::LinuxAarch64Gnu,
+                (Platform::LinuxAarch64, LinuxAbi::Musl) => Platform::LinuxAarch64Musl,
+                (Platform::LinuxX86_64, LinuxAbi::Gnu) => Platform::LinuxX86_64Gnu,
+                (Platform::LinuxX86_64, LinuxAbi::Musl) => Platform::LinuxX86_64Musl,
+                _ => unreachable!("only explicit Linux targets have a distinct base platform"),
+            }
+        } else {
+            legacy
+        };
+        ensure!(
+            targets.contains(&host),
+            "this project does not support {host}; [platforms] targets are {}",
+            join_targets(targets)
+        );
+        Ok(host)
+    }
 }
 
 impl Platform {
-    pub(crate) const ALL: [Self; 4] = [
+    pub(crate) const LEGACY_DEFAULT: [Self; 4] = [
         Self::MacosAarch64,
         Self::MacosX86_64,
         Self::LinuxAarch64,
         Self::LinuxX86_64,
     ];
+    pub(crate) const ALL: [Self; 8] = [
+        Self::MacosAarch64,
+        Self::MacosX86_64,
+        Self::LinuxAarch64,
+        Self::LinuxX86_64,
+        Self::LinuxAarch64Gnu,
+        Self::LinuxAarch64Musl,
+        Self::LinuxX86_64Gnu,
+        Self::LinuxX86_64Musl,
+    ];
 
-    pub(crate) fn current() -> Result<Self> {
-        Self::try_from((std::env::consts::OS, std::env::consts::ARCH))
+    /// OS and CPU identity shared by legacy and explicit targets.
+    pub(crate) const fn base_platform(self) -> Self {
+        match self {
+            Self::LinuxAarch64Gnu | Self::LinuxAarch64Musl => Self::LinuxAarch64,
+            Self::LinuxX86_64Gnu | Self::LinuxX86_64Musl => Self::LinuxX86_64,
+            _ => self,
+        }
+    }
+
+    pub(crate) const fn linux_abi(self) -> Option<LinuxAbi> {
+        match self {
+            Self::LinuxAarch64Gnu | Self::LinuxX86_64Gnu => Some(LinuxAbi::Gnu),
+            Self::LinuxAarch64Musl | Self::LinuxX86_64Musl => Some(LinuxAbi::Musl),
+            _ => None,
+        }
     }
 
     pub(crate) const fn os_aliases(self) -> &'static [&'static str] {
         match self {
             Self::MacosAarch64 | Self::MacosX86_64 => &["macos", "darwin"],
-            Self::LinuxAarch64 | Self::LinuxX86_64 => &["linux"],
+            _ => &["linux"],
         }
     }
 
     pub(crate) const fn arch_aliases(self) -> &'static [&'static str] {
         match self {
-            Self::MacosAarch64 | Self::LinuxAarch64 => &["aarch64", "arm64"],
-            Self::MacosX86_64 | Self::LinuxX86_64 => &["x86_64", "amd64", "x64", "x86-64"],
+            Self::MacosAarch64
+            | Self::LinuxAarch64
+            | Self::LinuxAarch64Gnu
+            | Self::LinuxAarch64Musl => &["aarch64", "arm64"],
+            _ => &["x86_64", "amd64", "x64", "x86-64"],
         }
     }
 
@@ -53,11 +151,13 @@ impl Platform {
             .any(|alias| contains_token(name, alias))
     }
 
-    pub(crate) const fn target(self) -> &'static str {
+    pub(crate) const fn rust_target(self) -> &'static str {
         match self {
             Self::MacosAarch64 | Self::MacosX86_64 => "universal-apple-darwin",
-            Self::LinuxAarch64 => "aarch64-unknown-linux-musl",
-            Self::LinuxX86_64 => "x86_64-unknown-linux-musl",
+            Self::LinuxAarch64 | Self::LinuxAarch64Musl => "aarch64-unknown-linux-musl",
+            Self::LinuxX86_64 | Self::LinuxX86_64Musl => "x86_64-unknown-linux-musl",
+            Self::LinuxAarch64Gnu => "aarch64-unknown-linux-gnu",
+            Self::LinuxX86_64Gnu => "x86_64-unknown-linux-gnu",
         }
     }
 }
@@ -73,7 +173,23 @@ pub(crate) fn canonical_targets(targets: &[Platform]) -> Result<Vec<Platform>> {
         bail!("duplicate target `{}`", pair[0]);
     }
 
+    for target in &canonical {
+        let legacy = target.base_platform();
+        if *target != legacy && canonical.contains(&legacy) {
+            bail!(
+                "cannot mix legacy target `{legacy}` with `{target}`; choose either the legacy target or explicit ABI targets for that architecture"
+            );
+        }
+    }
     Ok(canonical)
+}
+
+pub(crate) fn join_targets(targets: &[Platform]) -> String {
+    targets
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Case-insensitive token match: `alias` must not be glued to other
@@ -116,7 +232,7 @@ impl TryFrom<String> for Platform {
             .into_iter()
             .find(|platform| platform.to_string() == id)
             .ok_or_else(|| {
-                let supported = Self::ALL.map(|platform| platform.to_string()).join(", ");
+                let supported = join_targets(&Self::ALL);
                 anyhow::anyhow!("unknown target `{id}`; supported targets: {supported}")
             })
     }
@@ -135,6 +251,10 @@ impl Display for Platform {
             Self::MacosX86_64 => "macos-x86_64",
             Self::LinuxAarch64 => "linux-aarch64",
             Self::LinuxX86_64 => "linux-x86_64",
+            Self::LinuxAarch64Gnu => "linux-aarch64-gnu",
+            Self::LinuxAarch64Musl => "linux-aarch64-musl",
+            Self::LinuxX86_64Gnu => "linux-x86_64-gnu",
+            Self::LinuxX86_64Musl => "linux-x86_64-musl",
         };
 
         formatter.write_str(name)
@@ -168,19 +288,23 @@ mod tests {
                 "macos-aarch64",
                 "macos-x86_64",
                 "linux-aarch64",
-                "linux-x86_64"
+                "linux-x86_64",
+                "linux-aarch64-gnu",
+                "linux-aarch64-musl",
+                "linux-x86_64-gnu",
+                "linux-x86_64-musl",
             ]
         );
         for (platform, id) in Platform::ALL.into_iter().zip(ids) {
             assert_eq!(Platform::try_from(id).unwrap(), platform);
         }
         assert!(Platform::ALL.is_sorted());
-        for id in ["windows-x86_64", "linux-x86_64-gnu", "Linux-x86_64", ""] {
+        for id in ["windows-x86_64", "linux-x86_64-uclibc", "Linux-x86_64", ""] {
             let error = Platform::try_from(id.to_owned()).unwrap_err();
             assert_eq!(
                 error.to_string(),
                 format!(
-                    "unknown target `{id}`; supported targets: macos-aarch64, macos-x86_64, linux-aarch64, linux-x86_64"
+                    "unknown target `{id}`; supported targets: macos-aarch64, macos-x86_64, linux-aarch64, linux-x86_64, linux-aarch64-gnu, linux-aarch64-musl, linux-x86_64-gnu, linux-x86_64-musl"
                 )
             );
         }
@@ -188,6 +312,12 @@ mod tests {
 
     #[test]
     fn canonicalizes_target_lists() {
+        use Platform::*;
+        assert_eq!(
+            canonical_targets(&[LinuxX86_64Musl, LinuxAarch64, MacosX86_64, LinuxX86_64Gnu])
+                .unwrap(),
+            [MacosX86_64, LinuxAarch64, LinuxX86_64Gnu, LinuxX86_64Musl],
+        );
         assert_eq!(
             canonical_targets(&[Platform::LinuxX86_64, Platform::MacosAarch64]).unwrap(),
             [Platform::MacosAarch64, Platform::LinuxX86_64]
@@ -206,6 +336,65 @@ mod tests {
             .to_string(),
             "duplicate target `linux-x86_64`"
         );
+    }
+
+    #[test]
+    fn simulated_hosts_select_the_exact_linux_abi() {
+        use Platform::*;
+        for (arch, gnu, musl) in [
+            ("x86_64", LinuxX86_64Gnu, LinuxX86_64Musl),
+            ("aarch64", LinuxAarch64Gnu, LinuxAarch64Musl),
+        ] {
+            let host = Host { os: "linux", arch };
+            assert_eq!(
+                host.target(&[gnu, musl], || Some(LinuxAbi::Gnu)).unwrap(),
+                gnu
+            );
+            assert_eq!(
+                host.target(&[gnu, musl], || Some(LinuxAbi::Musl)).unwrap(),
+                musl
+            );
+            let error = host.target(&[gnu], || Some(LinuxAbi::Musl)).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("this project does not support {musl}; [platforms] targets are {gnu}")
+            );
+            let error = host.target(&[gnu], || None).unwrap_err();
+            assert!(error.to_string().contains("could not determine libc"));
+            assert!(error.to_string().contains(&gnu.base_platform().to_string()));
+        }
+    }
+
+    #[test]
+    fn simulated_legacy_macos_and_unsupported_hosts_skip_libc_detection() {
+        use Platform::*;
+        for (os, arch, target) in [
+            ("linux", "x86_64", LinuxX86_64),
+            ("linux", "aarch64", LinuxAarch64),
+            ("macos", "aarch64", MacosAarch64),
+            ("macos", "x86_64", MacosX86_64),
+        ] {
+            let host = Host { os, arch };
+            let other = if target == LinuxAarch64 {
+                LinuxX86_64Musl
+            } else {
+                LinuxAarch64Gnu
+            };
+            let targets = [target, other];
+            assert_eq!(
+                host.target(&targets, || panic!("no libc check needed"))
+                    .unwrap(),
+                target
+            );
+        }
+        let host = Host {
+            os: "linux",
+            arch: "riscv64",
+        };
+        let error = host
+            .target(&[LinuxX86_64Gnu], || panic!("unsupported arch"))
+            .unwrap_err();
+        assert_eq!(error.to_string(), "unsupported platform: linux-riscv64");
     }
 
     #[test]
@@ -242,12 +431,21 @@ mod tests {
 
     #[test]
     fn maps_platforms_to_portable_release_targets() {
-        assert_eq!(Platform::MacosAarch64.target(), "universal-apple-darwin");
-        assert_eq!(Platform::MacosX86_64.target(), "universal-apple-darwin");
         assert_eq!(
-            Platform::LinuxAarch64.target(),
+            Platform::MacosAarch64.rust_target(),
+            "universal-apple-darwin"
+        );
+        assert_eq!(
+            Platform::MacosX86_64.rust_target(),
+            "universal-apple-darwin"
+        );
+        assert_eq!(
+            Platform::LinuxAarch64.rust_target(),
             "aarch64-unknown-linux-musl"
         );
-        assert_eq!(Platform::LinuxX86_64.target(), "x86_64-unknown-linux-musl");
+        assert_eq!(
+            Platform::LinuxX86_64.rust_target(),
+            "x86_64-unknown-linux-musl"
+        );
     }
 }

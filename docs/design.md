@@ -142,25 +142,53 @@ minimum-release-age-minutes = 1440
 
 The value may be set to `0` when immediate releases are explicitly desired.
 
-Projects may declare their supported platforms explicitly
-([ADR-0001](adr/0001-explicit-project-and-tool-targets.md)):
+### Platform targets
 
-```toml
-[platforms]
-targets = ["macos-aarch64", "linux-x86_64"]
+A tool inherits `[platforms].targets` unless it declares a nonempty subset
+in `targets`. Tool-level targets require `[platforms]`. See the
+[manifest examples](../README.md#platform-targets) and
+[ADR-0001](adr/0001-explicit-project-and-tool-targets.md).
 
-[tools.example]
-version = "1.2.3"
-source = "github:owner/example"
-targets = ["linux-x86_64"]
-```
+The lockfile puts the original four targets first in canonical order
+(`macos-aarch64`, `macos-x86_64`, `linux-aarch64`, `linux-x86_64`), followed by
+`linux-aarch64-gnu`, `linux-aarch64-musl`, `linux-x86_64-gnu`, and
+`linux-x86_64-musl`. Without `[platforms]`, the original four remain the
+default. The legacy Linux IDs still match OS and architecture alone and
+expand `{target}` to the historical musl triples. Binloom never reinterprets
+them as ABI-specific IDs. A target list cannot combine a legacy Linux ID
+with an explicit ABI for the same architecture. Windows support is tracked
+in [#35](https://github.com/KyrboForge/binloom/issues/35).
 
-Accepted ids are `macos-aarch64`, `macos-x86_64`, `linux-aarch64`, and
-`linux-x86_64`. Lists must be non-empty and free of duplicates; order is
-irrelevant and Binloom uses that canonical order. A tool inherits the project
-targets, and its own `targets` must be a subset of them; tool targets without
-`[platforms]` are rejected. Without `[platforms]`, every tool targets all four
-platforms and the lockfile is unchanged from earlier releases.
+Automatic selection for explicit Linux targets requires a standalone
+`gnu` or `glibc` token for GNU, or a `musl` token for musl, in the platform
+portion of the asset name. An explicit `asset` pattern asserts compatibility
+and can match a filename without an ABI token. Both paths reject an
+opposite or mixed ABI label. The `{target}`
+placeholder expands to a Rust triple such as `x86_64-unknown-linux-gnu` or
+`x86_64-unknown-linux-musl`. The lock uses Binloom IDs as keys. Binloom
+never falls back between GNU and musl or silently drops a required target.
+Missing-asset diagnostics name the target and why candidates were rejected.
+Each Linux target requires a distinct asset. The sharing exception is a
+macOS asset named `universal` with neither architecture label.
+
+### Linux target detection
+
+Binloom matches the running OS and architecture first. For an explicit
+target on that Linux architecture, it reads ELF loader paths (`PT_INTERP`)
+from `/proc/self/exe`, `/bin/sh`, and `/usr/bin/env`. Static executables have
+no interpreter, so other binaries can supply the evidence. At least one
+recognized loader is required and all loaders found must agree. No usable
+evidence, conflicting evidence, or an unrecognized loader produces a
+`could not determine libc` error. Binloom uses neither distro names nor
+`/etc/*release` files. It has no default ABI or override flag.
+
+Custom loader names, some NixOS-style loader paths, emulation such as QEMU,
+and minimal or distroless containers without standard system binaries can
+leave libc undetermined. ABI matching identifies the libc family only and
+cannot guarantee a minimum glibc version, the presence of required shared
+libraries, or compatibility with every distribution. A `musl` suffix does
+not guarantee static linking. A `gnu` suffix declares no minimum glibc
+version. See [ADR-0002](adr/0002-linux-gnu-and-musl-targets.md).
 
 ## Lockfile
 
@@ -197,24 +225,25 @@ inputs so that `install` and `exec` can detect a stale lock: a top-level
 `[platforms] targets` list and, per tool, its effective `targets` plus an
 `asset-pattern` snapshot of the manifest's `asset` when set. Release tools
 lock exactly one artifact per target. Binloom's own artifacts still cover
-all four platforms.
+the four legacy platforms.
 
 ```toml
 [platforms]
 targets = [
     "macos-aarch64",
-    "linux-x86_64",
+    "linux-x86_64-gnu",
+    "linux-x86_64-musl",
 ]
 
 [tools.example]
 version = "1.2.3"
 source = "github:owner/example"
 tag = "v1.2.3"
-targets = ["linux-x86_64"]
-asset-pattern = "example_{version}_{os}_{arch}.gz"
+targets = ["linux-x86_64-gnu"]
+asset-pattern = "example_{version}_{target}.gz"
 
-[tools.example.artifacts.linux-x86_64]
-asset = "example_1.2.3_linux_x86_64.gz"
+[tools.example.artifacts.linux-x86_64-gnu]
+asset = "example_1.2.3_x86_64-unknown-linux-gnu.gz"
 url = "..."
 sha256 = "..."
 format = "gz"
@@ -239,7 +268,7 @@ sha256 = "..."
 
 When neither release metadata nor a checksum sidecar provides a checksum,
 locking downloads and hashes the artifact for every supported platform. This
-can be bandwidth-heavy: up to four complete artifacts are downloaded, and a
+can be bandwidth-heavy: complete artifacts may be downloaded for every target, and a
 following install downloads the current platform artifact again. Upstreams
 that publish SHA-256 digests or checksum files avoid these locking downloads.
 
@@ -259,20 +288,25 @@ binloom path
 - `init` creates only missing files and never overwrites project files.
 - `add` appends one exact tool requirement, rebuilds the lockfile at those
   requested versions, and installs the tools.
-- `install` consumes an existing lockfile. If none exists, it resolves the
-  exact versions pinned in the manifest and creates the lockfile without
-  changing the manifest.
+- `install` consumes an existing lockfile. A missing lockfile directs the
+  user to `binloom update`.
 - `update <tool>` selects that tool's latest stable release and preserves the
   other locked entries.
 - `update` without a name updates every tool, Binloom, and wrapper metadata.
 - `update --self` updates only Binloom and wrapper metadata.
 - `exec` prepends `.tools/.bin` to `PATH` for one process. It does not mutate
   the user's shell.
-- With `[platforms]`, `install` fails before any change on a host outside the
-  project targets and skips (and reports) tools that exclude the host; `exec`
-  of such a tool fails without falling back to `PATH`. Neither command
-  rewrites an existing lockfile; a lock whose targets or asset patterns no
-  longer match the manifest must be regenerated with `update`.
+- With `[platforms]`, `install` and declared-tool `exec` fail before
+  installation changes on a host outside the project targets. On a
+  supported host, `install` skips tools excluding the detected target and
+  `exec` rejects them with a diagnostic naming the target. An unavailable
+  declared tool never falls through to a same-named command on `PATH`.
+- Both file versions remain at 1. Changes to targets or asset patterns
+  require regenerating the lock with `binloom update`. Neither `install`
+  nor `exec` rewrites an existing lock. There is no migration command.
+  Older Binloom executables may reject explicit ABI IDs. Bootstrap and the
+  pinned Binloom and wrapper upgrade are tracked in
+  [#38](https://github.com/KyrboForge/binloom/issues/38).
 - `update` resolves every tool for its full target set before replacing any
   file; lockfile and manifest writes are atomic. `update <tool>` refuses to run
   when `[platforms] targets` changed, because the whole lock must be

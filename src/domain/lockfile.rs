@@ -61,8 +61,34 @@ pub(crate) struct LockedTool {
     )]
     pub(crate) asset_pattern: Option<String>,
 
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        serialize_with = "serialize_artifacts"
+    )]
     pub(crate) artifacts: BTreeMap<String, LockedArtifact>,
+}
+
+fn serialize_artifacts<S: serde::Serializer>(
+    artifacts: &BTreeMap<String, LockedArtifact>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    if !Platform::ALL
+        .iter()
+        .any(|target| target.linux_abi().is_some() && artifacts.contains_key(&target.to_string()))
+    {
+        // Keep the original v1 artifact table ordering for existing locks.
+        return artifacts.serialize(serializer);
+    }
+    let canonical = Platform::ALL.map(|target| target.to_string());
+    let mut ordered: Vec<_> = artifacts.iter().collect();
+    ordered.sort_by_key(|(key, _)| {
+        canonical
+            .iter()
+            .position(|id| id == *key)
+            .unwrap_or(canonical.len())
+    });
+    serializer.collect_map(ordered)
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -704,6 +730,63 @@ checksum-source = "digest"
     }
 
     #[test]
+    fn legacy_release_lock_roundtrips_byte_for_byte() {
+        let legacy = EXPLICIT_LOCK
+            .replace(
+                "[platforms]\ntargets = [\n    \"macos-aarch64\",\n    \"linux-x86_64\",\n]\n\n",
+                "",
+            )
+            .replace(
+                "targets = [\"linux-x86_64\"]\nasset-pattern = \"tool-{os}-{arch}\"\n",
+                "",
+            );
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("binloom.lock");
+        fs::write(&path, &legacy).unwrap();
+        let loaded = Lockfile::try_from(path.as_path()).unwrap();
+        assert!(loaded.platforms.is_none());
+        assert_eq!(Toml::try_from(&loaded).unwrap().0, legacy);
+    }
+
+    #[test]
+    fn abi_lock_serializes_target_arrays_and_artifacts_in_canonical_order() {
+        let (header, artifact) = EXPLICIT_LOCK.split_once("[tools.tool.artifacts.").unwrap();
+        let header = header
+            .replace(
+                "[\n    \"macos-aarch64\",\n    \"linux-x86_64\",\n]",
+                "[\"linux-x86_64-musl\", \"linux-x86_64-gnu\", \"macos-aarch64\"]",
+            )
+            .replace(
+                "[\"linux-x86_64\"]",
+                "[\"linux-x86_64-musl\", \"macos-aarch64\", \"linux-x86_64-gnu\"]",
+            );
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("binloom.lock");
+        let mut input = header;
+        for target in ["linux-x86_64-musl", "linux-x86_64-gnu", "macos-aarch64"] {
+            input.push_str(&format!(
+                "[tools.tool.artifacts.{}\n",
+                artifact.replace("linux-x86_64", target)
+            ));
+        }
+        fs::write(&path, &input).unwrap();
+        let loaded = Lockfile::try_from(path.as_path()).unwrap();
+        let canonical = Toml::try_from(&loaded).unwrap().0;
+        let targets =
+            "[\n    \"macos-aarch64\",\n    \"linux-x86_64-gnu\",\n    \"linux-x86_64-musl\",\n]";
+        assert_eq!(canonical.matches(targets).count(), 2);
+        let tables = ["macos-aarch64", "linux-x86_64-gnu", "linux-x86_64-musl"].map(|target| {
+            canonical
+                .find(&format!("[tools.tool.artifacts.{target}]"))
+                .unwrap()
+        });
+        assert!(tables.is_sorted());
+        fs::write(&path, &canonical).unwrap();
+        let loaded = Lockfile::try_from(path.as_path()).unwrap();
+        assert_eq!(Toml::try_from(&loaded).unwrap().0, canonical);
+    }
+
+    #[test]
     fn rejects_inconsistent_lock_targets() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("binloom.lock");
@@ -742,7 +825,21 @@ checksum-source = "digest"
             ),
             (
                 EXPLICIT_LOCK.replace("[\"linux-x86_64\"]", "[\"linux-x86_64-gnu\"]"),
-                "unknown target `linux-x86_64-gnu`",
+                "target `linux-x86_64-gnu` is not in [platforms] targets",
+            ),
+            (
+                EXPLICIT_LOCK.replace(
+                    "\"macos-aarch64\",\n    \"linux-x86_64\"",
+                    "\"linux-x86_64\",\n    \"linux-x86_64-musl\"",
+                ),
+                "cannot mix legacy target `linux-x86_64` with `linux-x86_64-musl`",
+            ),
+            (
+                EXPLICIT_LOCK.replace("linux-x86_64", "linux-x86_64-musl").replace(
+                    "[tools.tool.artifacts.linux-x86_64-musl]",
+                    "[tools.tool.artifacts.linux-x86_64]",
+                ),
+                "release artifacts must match targets",
             ),
         ];
 
