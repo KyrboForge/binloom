@@ -10,14 +10,14 @@ use crate::{
     download,
 };
 use anyhow::{Context, Result, bail, ensure};
-use flate2::read::GzDecoder;
+use flate2::read::{GzDecoder, MultiGzDecoder};
 use rustix::{
     fs::{Access, AtFlags, CWD, Mode, OFlags, accessat},
     io::Errno,
     process::geteuid,
 };
 use sha2::{Digest, Sha256};
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::{
     fs,
     io::{self, Read, Seek, Write},
@@ -113,7 +113,7 @@ pub(super) fn install_from(root: &Path, client: &download::Client) -> Result<()>
         .into_iter()
         .flatten()
         {
-            check_cache_type(path, fs::Metadata::is_dir)?;
+            check_cache_directory(path)?;
         }
         let matches = match binloom.artifacts.get(&platform_key) {
             // The POSIX wrapper writes the Binloom bootstrap cache; its marker alone is not
@@ -343,9 +343,36 @@ fn remove_abandoned_temporaries(directory: &Path) -> Result<()> {
 }
 
 fn create_cache_directory(path: &Path) -> Result<()> {
-    let created = fs::create_dir_all(path);
-    check_cache_type(path, fs::Metadata::is_dir)?;
+    // Explicit mode: a 002 umask would otherwise create 0775 directories that we then reject.
+    let created = fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o755)
+        .create(path);
+    check_cache_directory(path)?;
     created.with_context(|| format!("failed to create {}", path.display()))
+}
+
+/// A managed cache directory must be a real directory owned by the effective user (root
+/// excepted) and not writable by group/others, or its owner-verified contents could be swapped.
+fn check_cache_directory(path: &Path) -> Result<()> {
+    check_cache_type(path, fs::Metadata::is_dir)?;
+    match path.symlink_metadata() {
+        Ok(metadata) => {
+            let owner = metadata.uid();
+            ensure!(
+                (owner == geteuid().as_raw() || owner == 0) && metadata.mode() & 0o022 == 0,
+                "refusing cache directory {} (owner {owner}, mode {:o}): it must be owned by you and not group/other-writable; run `chmod go-w {}`",
+                path.display(),
+                metadata.mode() & 0o7777,
+                path.display()
+            );
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to inspect {}", path.display()));
+        }
+    }
+    Ok(())
 }
 
 fn check_cache_type(path: &Path, expected: fn(&fs::Metadata) -> bool) -> Result<()> {
@@ -733,7 +760,7 @@ fn unpack_with_limit(
             io::copy(&mut source, &mut destination)?;
         }
         ArtifactFormat::Gz => {
-            copy_limited(GzDecoder::new(source), &mut destination, max_bytes)?;
+            copy_limited(MultiGzDecoder::new(source), &mut destination, max_bytes)?;
         }
         ArtifactFormat::Zip => {
             let mut archive = zip::ZipArchive::new(source)?;

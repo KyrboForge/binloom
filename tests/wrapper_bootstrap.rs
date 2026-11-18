@@ -237,6 +237,22 @@ impl Artifact {
     }
 }
 
+impl Artifact {
+    /// A gz artifact made of two concatenated members, as `gzip -dc` and `cat a.gz b.gz` produce.
+    fn multi_member(tag: &str) -> Self {
+        let program = script(tag);
+        let (head, tail) = program.split_at(program.len() / 2);
+        let mut body = gzip(head);
+        body.extend(gzip(tail));
+        Self {
+            tag: tag.to_owned(),
+            body,
+            program,
+            format: "gz",
+        }
+    }
+}
+
 const FORMATS: [&str; 2] = ["raw", "gz"];
 
 struct Fixture {
@@ -609,17 +625,14 @@ fn executable_modes_are_respected_or_repaired() {
     let exe = fx.dir("1.0.0").join("binloom");
     let mode = || fs::metadata(&exe).unwrap().permissions().mode() & 0o777;
 
-    fs::set_permissions(&exe, fs::Permissions::from_mode(0o700)).unwrap();
-    let (output, requests) = fx.run_offline();
-    assert_ran(&output, "good");
-    assert!(requests.is_empty());
-    assert_eq!(mode(), 0o700);
-
-    fs::set_permissions(&exe, fs::Permissions::from_mode(0o644)).unwrap();
-    let (output, requests) = fx.run_offline();
-    assert_ran(&output, "good");
-    assert!(requests.is_empty());
-    assert_eq!(mode(), 0o755);
+    // Only the owner execute bit is added; other bits are never widened.
+    for (before, after) in [(0o600, 0o700), (0o644, 0o744), (0o700, 0o700)] {
+        fs::set_permissions(&exe, fs::Permissions::from_mode(before)).unwrap();
+        let (output, requests) = fx.run_offline();
+        assert_ran(&output, "good");
+        assert!(requests.is_empty());
+        assert_eq!(mode(), after, "{before:o}");
+    }
 }
 
 #[test]
@@ -725,4 +738,75 @@ fn abandoned_temp_files_are_swept_but_live_and_foreign_ones_are_kept() {
     assert!(live.exists() && foreign.exists());
     assert!(link.symlink_metadata().is_ok());
     assert_eq!(fs::read(&outside).unwrap(), b"untouched");
+}
+
+#[test]
+fn group_or_other_writable_cache_directories_are_refused() {
+    let fx = Fixture::new();
+    let artifact = Artifact::new("good", "raw");
+    fx.install("1.0.0", &artifact);
+    let dirs = [
+        fx.root.join(".tools"),
+        fx.root.join(".tools/binloom"),
+        fx.dir("1.0.0"),
+    ];
+    // Either write bit alone must be rejected, matching the Rust `mode & 0o022` rule.
+    for dir in &dirs {
+        for mode in [0o775, 0o757, 0o777] {
+            fs::set_permissions(dir, fs::Permissions::from_mode(mode)).unwrap();
+            let (output, requests) = fx.run_offline();
+            assert_refused(&output, "good");
+            let message = stderr(&output);
+            assert!(
+                message.contains(&format!("chmod go-w {}", dir.display())),
+                "{message}"
+            );
+            assert!(requests.is_empty());
+        }
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).unwrap();
+        let (output, _) = fx.run_offline();
+        assert_ran(&output, "good");
+    }
+}
+
+#[test]
+fn fresh_install_under_a_group_writable_umask_creates_private_directories() {
+    let fx = Fixture::new();
+    let artifact = Artifact::new("good", "raw");
+    fx.lock("1.0.0", &artifact);
+    let (output, _) = fx.serving(&artifact.body, || {
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "umask 002; exec ./binloomw"])
+            .current_dir(&fx.root)
+            .env_clear()
+            .env("PATH", fx.temp.path().join("bin"))
+            .env("HOME", fx.temp.path());
+        command.output().unwrap()
+    });
+    assert_ran(&output, "good");
+    for dir in [
+        fx.root.join(".tools"),
+        fx.root.join(".tools/binloom"),
+        fx.dir("1.0.0"),
+    ] {
+        assert_eq!(
+            fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+    }
+}
+
+#[test]
+fn multi_member_gzip_installs_and_is_reused() {
+    let fx = Fixture::new();
+    let artifact = Artifact::multi_member("multi");
+    fx.install("1.0.0", &artifact);
+    assert_eq!(
+        fs::read(fx.dir("1.0.0").join("binloom")).unwrap(),
+        artifact.program
+    );
+    let (output, requests) = fx.run_offline();
+    assert_ran(&output, "multi");
+    assert!(requests.is_empty());
 }

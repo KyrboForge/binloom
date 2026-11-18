@@ -325,7 +325,9 @@ Publication and concurrency:
 
 - Staged files (`.binloom-tmp.*`, wrapper: `.binloomw-tmp.*`) live in the
   version directory. Archive, executable, then stamps are published by atomic
-  rename and the files and directory are fsynced. Any interrupted state reads
+  rename; the Rust installer fsyncs the files and directory, the wrapper only
+  runs a best-effort `sync` before and after publishing (no per-file fsync).
+  Any interrupted state reads
   as "not cached" and is repaired next run; a failed staging step leaves the
   previous installation untouched. Abandoned staging files are swept under
   the lock.
@@ -348,11 +350,13 @@ Known limits:
   executing the other's verified bytes.
 - Anyone who can rewrite both the executable and the lockfile controls what runs;
   the lockfile is trusted repository state.
-- Cache directories are trusted like the rest of the checkout: their ownership
-  and group/other write bits are not checked, so a user who can write into
-  `.tools/` (as into `binloom.lock`) can swap verified content. Common umasks
-  such as `002` create group-writable directories, so rejecting them would
-  break ordinary setups.
+- Managed cache directories (`.tools`, `.tools/<name>`, `.tools/<name>/<version>`,
+  and `.tools/.bin` in the Rust installer) must be owned by the effective user
+  (root excepted) and not group/other-writable (`mode & 0o022`); otherwise both
+  the installer and `binloomw` fail closed and name the path to `chmod go-w`.
+  New directories are created `0755` regardless of umask, so a `002` umask
+  works. Directories already group-writable (e.g. created by an older version
+  under `002`) must be fixed once by hand.
 - `bootstrap.sh` has no cache and fetches `SHA256SUMS` from the same release
   origin as the archive: it detects corruption, not a compromised release.
 - Windows is out of scope (#35).

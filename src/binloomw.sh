@@ -196,12 +196,22 @@ fail() {
     exit 1
 }
 
+# Mirrors the Rust verifier: an executable or cache directory owned by someone
+# else (root excepted) or writable by group/others is replaced or refused instead
+# of trusted. -prune keeps find from descending into directories.
+owned_and_private() {
+    [ -n "$(find "$1" -prune \( -user "$(id -u)" -o -user 0 \) ! -perm -020 ! -perm -002 2>/dev/null)" ]
+}
+
 check_dir() {
     if [ -L "$1" ]; then
         fail "refusing to use symlink: $1"
     fi
     if [ -e "$1" ] && [ ! -d "$1" ]; then
         fail "expected a directory: $1"
+    fi
+    if [ -d "$1" ] && ! owned_and_private "$1"; then
+        fail "refusing cache directory $1: it must be owned by you and not group/other-writable; run: chmod go-w $1"
     fi
 }
 
@@ -230,12 +240,6 @@ gz_sha256() {
     gzip -dc "$1" | head -c $((MAX_DECOMPRESSED_BYTES + 1)) | sha256_file -
 }
 
-# Mirrors the Rust verifier: an executable owned by someone else (root excepted)
-# or writable by group/others is replaced instead of run.
-owned_and_private() {
-    [ -n "$(find "$1" \( -user "$(id -u)" -o -user 0 \) ! -perm -020 ! -perm -002 2>/dev/null)" ]
-}
-
 cache_valid() {
     [ -f "$BINLOOM" ] && [ -f "$CHECKSUM_STAMP" ] && [ -f "$EXECUTABLE_STAMP" ] || return 1
     owned_and_private "$BINLOOM" || return 1
@@ -249,6 +253,8 @@ cache_valid() {
             ;;
         gz)
             [ -f "$RETAINED_ARTIFACT" ] || return 1
+            # gz_sha256 stops at the cap, so a longer file could match as a truncated prefix.
+            [ "$(wc -c < "$BINLOOM")" -le "$MAX_DECOMPRESSED_BYTES" ] || return 1
             [ "$(sha256_file "$RETAINED_ARTIFACT" 2>/dev/null)" = "$SHA256" ] || return 1
             [ "$(gz_sha256 "$RETAINED_ARTIFACT" 2>/dev/null)" = "$exe_sha256" ] || return 1
             ;;
@@ -258,7 +264,7 @@ cache_valid() {
     esac
 
     # A verified executable that we cannot run is repaired when we own it.
-    [ -x "$BINLOOM" ] || chmod 755 "$BINLOOM" 2>/dev/null || return 1
+    [ -x "$BINLOOM" ] || chmod u+x "$BINLOOM" 2>/dev/null || return 1
     [ -x "$BINLOOM" ]
 }
 
@@ -273,7 +279,11 @@ case "$FORMAT" in
     *) fail "unsupported Binloom asset format: $FORMAT" ;;
 esac
 
-mkdir -p "$INSTALL_DIR"
+# Create missing components with an explicit mode (umask 002 must not yield 0775).
+for dir in "$TOOLS_DIR" "$BINLOOM_DIR" "$INSTALL_DIR"; do
+    [ -e "$dir" ] || mkdir -m 755 "$dir" 2>/dev/null || [ -d "$dir" ] || fail "cannot create $dir"
+    check_dir "$dir"
+done
 
 # Sweep temp files abandoned by killed runs; skip those of live processes.
 for stale in "$INSTALL_DIR/$TMP_PREFIX".*; do
@@ -354,6 +364,11 @@ EXECUTABLE_STAMP_TMP=""
 check_file "$CHECKSUM_STAMP"
 mv "$ARTIFACT_STAMP_TMP" "$CHECKSUM_STAMP"
 ARTIFACT_STAMP_TMP=""
+
+# Best effort: flush the renames (not a per-file fsync) before running.
+if command -v sync >/dev/null 2>&1; then
+    sync
+fi
 
 cleanup
 trap - EXIT HUP INT TERM
