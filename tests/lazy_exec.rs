@@ -283,7 +283,11 @@ fn invalid_manifest_entry_without_a_locked_tool_blocks_path_fallback() {
     let impostor = root.join(TOOL);
     fs::write(&impostor, b"#!/bin/sh\necho impostor\n").unwrap();
     fs::set_permissions(impostor, fs::Permissions::from_mode(0o755)).unwrap();
-    for lock in [None, Some("invalid TOML"), Some("lock-version = 1\n")] {
+    for (lock, diagnostic) in [
+        (None, "must be written as 1.0.0"),
+        (Some("invalid TOML"), "binloom.lock"),
+        (Some("lock-version = 1\n"), "must be written as 1.0.0"),
+    ] {
         if let Some(lock) = lock {
             fs::write(root.join("binloom.lock"), lock).unwrap();
         }
@@ -294,10 +298,37 @@ fn invalid_manifest_entry_without_a_locked_tool_blocks_path_fallback() {
             .unwrap();
         assert!(!output.status.success());
         assert!(output.stdout.is_empty());
+        assert!(stderr(&output).contains(diagnostic), "{}", stderr(&output));
+    }
+}
+
+#[test]
+fn unreadable_tool_tables_block_path_fallback() {
+    for (manifest, lock, broken_file) in [
+        (b"[".as_slice(), None, "binloom.toml"),
+        (b"[", Some("["), "binloom.toml"),
+        (b"\xff", None, "binloom.toml"),
+        (b"tools = 1", None, "binloom.toml"),
+        (b"[tools]", Some("tools = 1"), "binloom.lock"),
+    ] {
+        let project = tempfile::tempdir().unwrap();
+        let root = project.path();
+        fs::write(root.join("binloom.toml"), manifest).unwrap();
+        if let Some(lock) = lock {
+            fs::write(root.join("binloom.lock"), lock).unwrap();
+        }
+        fs::copy("/bin/echo", root.join(TOOL)).unwrap();
+        let output = cli(root)
+            .env("PATH", root)
+            .args(["exec", TOOL, "unexpected fallback"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let error = stderr(&output);
         assert!(
-            stderr(&output).contains("must be written as 1.0.0"),
-            "{}",
-            stderr(&output)
+            error.contains(broken_file) && error.contains("binloom update"),
+            "{error}"
         );
     }
 }
@@ -392,6 +423,65 @@ fn raw_executable_with_rewritten_stamp_must_match_locked_digest() {
         "{}",
         stderr(&output)
     );
+}
+
+fn assert_archive_cache_repairs(damage: impl Fn(&Path)) {
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path();
+    let artifact = tar_gz(SCRIPT);
+    let server = Server::start(&artifact, Duration::ZERO);
+    write_project(
+        root,
+        &[TOOL],
+        &server.url,
+        "tar-gz",
+        &checksum(&artifact),
+        &platform(),
+    );
+    assert_ran_tool(exec_tool(root));
+    let directory = version_dir(root);
+    let retained = directory.join(".artifact");
+    assert_eq!(fs::read(&retained).unwrap(), artifact);
+
+    damage(&directory);
+    assert_ran_tool(exec_tool(root));
+    assert_eq!(fs::read(&retained).unwrap(), artifact);
+    assert_eq!(fs::read(directory.join(TOOL)).unwrap(), SCRIPT);
+    assert_eq!(server.shutdown(), 2);
+
+    damage(&directory);
+    let output = exec_tool(root);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        stderr(&output).contains("failed to install tool"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn archive_executable_with_rewritten_stamp_must_match_locked_archive() {
+    assert_archive_cache_repairs(|directory| {
+        let bytes = [SCRIPT, b"\n"].concat();
+        fs::write(directory.join(TOOL), &bytes).unwrap();
+        fs::write(directory.join(".executable-sha256"), checksum(&bytes)).unwrap();
+    });
+}
+
+#[test]
+fn retained_archive_must_match_locked_digest() {
+    assert_archive_cache_repairs(|directory| {
+        let path = directory.join(".artifact");
+        let mut archive = fs::read(&path).unwrap();
+        archive[4] ^= 1; // Change the gzip timestamp, preserving the extracted executable.
+        fs::write(path, archive).unwrap();
+    });
+}
+
+#[test]
+fn missing_retained_archive_requires_download() {
+    assert_archive_cache_repairs(|directory| fs::remove_file(directory.join(".artifact")).unwrap());
 }
 
 #[test]
@@ -670,7 +760,11 @@ fn lock_only_ancestor_does_not_enable_unmanaged_exec() {
             .unwrap();
         assert!(!output.status.success());
         assert!(
-            stderr(&output).contains("binloom.toml not found"),
+            stderr(&output).contains(if malformed {
+                "binloom.lock"
+            } else {
+                "binloom.toml not found"
+            }),
             "{}",
             stderr(&output)
         );
