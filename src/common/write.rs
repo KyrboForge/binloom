@@ -50,7 +50,12 @@ pub(crate) fn write_manifest_and_lock(root: &Path, manifest: &[u8], lock: &[u8])
             })?;
         return Err(error);
     }
-    sync_parent(&manifest_path)
+    sync_parent(&manifest_path)?;
+    // A symlink may place the lock in another directory; its rename needs its own sync.
+    if parent(&lock_path) != parent(&manifest_path) {
+        sync_parent(&lock_path)?;
+    }
+    Ok(())
 }
 
 fn parent(path: &Path) -> &Path {
