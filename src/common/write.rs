@@ -17,6 +17,14 @@ pub(crate) fn write_atomically(path: &Path, content: &[u8]) -> Result<()> {
         .write_all(content)
         .with_context(|| format!("failed to write temporary file for {}", path.display()))?;
 
+    // `NamedTempFile` is owner-only; keep the mode of the file being replaced.
+    if let Ok(metadata) = fs::metadata(path) {
+        temporary
+            .as_file()
+            .set_permissions(metadata.permissions())
+            .with_context(|| format!("failed to copy permissions of {}", path.display()))?;
+    }
+
     temporary
         .as_file()
         .sync_all()
@@ -38,4 +46,26 @@ pub(crate) fn write_atomically(path: &Path, content: &[u8]) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::write_atomically;
+    use std::{fs, os::unix::fs::PermissionsExt};
+
+    #[test]
+    fn keeps_permissions_of_the_replaced_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("binloom.toml");
+        fs::write(&path, "old").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        write_atomically(&path, b"new").unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+    }
 }

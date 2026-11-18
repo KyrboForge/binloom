@@ -3,7 +3,7 @@ use crate::domain::lockfile::{
     ArtifactFormat, ChecksumSource, LockedArtifact, LockedTool, LockedWrapper,
 };
 use crate::domain::manifest::Tool;
-use crate::domain::platform::Platform;
+use crate::domain::platform::{Platform, contains_token};
 use crate::domain::sources::{Source, bare_version, release};
 use crate::download;
 use crate::download::Client;
@@ -192,6 +192,8 @@ fn ensure_platform_specific_assets(
 ) -> anyhow::Result<()> {
     const HINT: &str =
         "use {os}, {arch} or {target} in the asset pattern so every platform locks its own asset";
+    // OSes Binloom cannot target yet; naming one never matches any platform.
+    const UNSUPPORTED_OS_ALIASES: [&str; 3] = ["windows", "win32", "win64"];
     // `v1.0.0` must go before `1.0.0`: the `v` would otherwise glue the bare
     // version to an alphanumeric and keep it visible.
     let tagged = if version.is_empty() {
@@ -212,7 +214,9 @@ fn ensure_platform_specific_assets(
         let platform_part = platform_part(asset);
         let foreign_os = Platform::ALL.iter().any(|other| {
             other.os_aliases() != platform.os_aliases() && other.os_in(&platform_part)
-        });
+        }) || UNSUPPORTED_OS_ALIASES
+            .iter()
+            .any(|alias| contains_token(&platform_part, alias));
         let foreign_arch = Platform::ALL.iter().any(|other| {
             other.arch_aliases() != platform.arch_aliases() && other.arch_in(&platform_part)
         });
@@ -735,6 +739,20 @@ mod tests {
         )
         .unwrap_err();
         assert!(format!("{error:#}").contains("macos-aarch64"), "{error:#}");
+    }
+
+    #[test]
+    fn rejects_windows_asset_for_a_single_linux_target() {
+        let error = resolve_targets(
+            &["tool-1.0.0-windows-x86_64.zip"],
+            Some("tool-{version}-windows-{arch}.zip"),
+            &[Platform::LinuxX86_64],
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("names a different OS"),
+            "{error:#}"
+        );
     }
 
     #[test]
