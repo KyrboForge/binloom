@@ -267,7 +267,7 @@ the committed lockfile.
   execution.
 - Completed executables are moved atomically into their versioned location.
 - An existing executable at the exact locked path makes installation
-  idempotent.
+  idempotent only after it passes the cache verification below.
 - Resolution never executes downloaded content.
 - Installing a Cargo source compiles trusted repository configuration and may
   execute the crate's build script. It requires existing `cargo` and `rustc`
@@ -277,6 +277,89 @@ the committed lockfile.
   file is streamed out: the file named after the tool, or the archive's only
   file. Nothing else is unpacked.
 - Unsupported archive formats fail instead of extracting paths or links.
+
+## Cache verification
+
+The committed manifest and lockfile define the expected artifacts. Everything
+under `.tools/` is user-writable and never an independent source of
+authenticity: stamp files only record that a publication finished.
+
+Per-version directory (`.tools/<tool>/<version>/`):
+
+| File | Purpose |
+| --- | --- |
+| `<tool>` | The executable |
+| `.artifact-sha256` / `.crate-sha256` | Locked digest this install was published for (a hint) |
+| `.artifact` | Retained, verified download for non-raw formats (gzip included) |
+| `.executable-sha256` | Digest of the extracted executable |
+| `.install.lock` | Cross-process lock owned by the Rust installer |
+
+Every `exec`, `install`, and `binloomw` run recomputes digests; a stamp match
+alone never counts as a hit:
+
+- **Raw:** the executable hashes to the locked SHA-256.
+- **Archive (gz, tar.\*, zip):** `.artifact` hashes to the locked SHA-256 and the
+  bytes unpacked from it hash to the executable's digest.
+- **Binloom's own bootstrap:** the same rules, applied by both `binloomw` and
+  `binloom install`; `.tools/.bin/binloom` is never linked to an unverified
+  executable.
+- **Cargo builds:** the crate archive digest identifies the source, not the
+  compiled bytes. The recorded `.executable-sha256` only detects accidental
+  corruption or tampering by someone who cannot also rewrite the stamps; it is
+  not an authenticity guarantee. A mismatch rebuilds from the
+  checksum-verified crate source (needs `cargo`) and otherwise fails.
+- **Legacy caches** without newer metadata are verified the same way; stamp-only
+  Binloom bootstrap caches from older wrappers are not trusted and are repaired.
+
+Integrity failures fail closed. An intact cache runs offline with no network.
+A corrupt cache is repaired by re-downloading and verifying, so offline it
+fails with an error instead of running modified bytes.
+
+Executability is checked for the effective user (owner, group, other and ACLs).
+A restrictive but valid mode such as `0700` is left alone. A verified file the
+caller owns but cannot execute gets its owner execute bit restored. Executables
+owned by another user (root excepted) or writable by group or others are
+replaced from the verified artifact.
+
+Publication and concurrency:
+
+- Staged files (`.binloom-tmp.*`, wrapper: `.binloomw-tmp.*`) live in the
+  version directory. Archive, executable, then stamps are published by atomic
+  rename; the Rust installer fsyncs the files and directory, the wrapper only
+  runs a best-effort `sync` before and after publishing (no per-file fsync).
+  Any interrupted state reads
+  as "not cached" and is repaired next run; a failed staging step leaves the
+  previous installation untouched. Abandoned staging files are swept under
+  the lock.
+- The Rust installer holds an exclusive `flock` on `.install.lock`, opened with
+  `O_NOFOLLOW`, and re-checks after locking that the locked inode is still the
+  path's inode. `exec` keeps the lock until `execve`. FIFOs, symlinks, and
+  directories at managed paths are rejected or replaced without following links.
+- `binloomw` has no lock (`flock` is not portable to macOS). Concurrent wrappers
+  and a concurrent `binloom install` are safe because every publish is an atomic
+  rename of verified content and every hit is re-verified; the worst case is a
+  redundant reinstall.
+
+Known limits:
+
+- Hashing and `execve` are separate steps. A process running as the same user
+  that rewrites the executable in place after hashing is not excluded; closing
+  that needs sealing (`memfd`/`fexecve`) or supervision. The same applies to two
+  `binloomw` wrappers whose lockfiles name different artifacts for one Binloom
+  version: they share one `.tools/binloom/<version>/` path, so one run can end up
+  executing the other's verified bytes.
+- Anyone who can rewrite both the executable and the lockfile controls what runs;
+  the lockfile is trusted repository state.
+- Managed cache directories (`.tools`, `.tools/<name>`, `.tools/<name>/<version>`,
+  and `.tools/.bin` in the Rust installer) must be owned by the effective user
+  (root excepted) and not group/other-writable (`mode & 0o022`); otherwise both
+  the installer and `binloomw` fail closed and name the path to `chmod go-w`.
+  New directories are created `0755` regardless of umask, so a `002` umask
+  works. Directories already group-writable (e.g. created by an older version
+  under `002`) must be fixed once by hand.
+- `bootstrap.sh` has no cache and fetches `SHA256SUMS` from the same release
+  origin as the archive: it detects corruption, not a compromised release.
+- Windows is out of scope (#35).
 
 ## Language independence
 

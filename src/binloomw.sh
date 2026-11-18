@@ -165,49 +165,212 @@ if ! validate_version "$VERSION"; then
     echo "error: unsafe Binloom version in lockfile: $VERSION" >&2
     exit 1
 fi
-INSTALL_DIR="$ROOT_DIR/.tools/binloom/$VERSION"
+TOOLS_DIR="$ROOT_DIR/.tools"
+BINLOOM_DIR="$TOOLS_DIR/binloom"
+INSTALL_DIR="$BINLOOM_DIR/$VERSION"
 BINLOOM="$INSTALL_DIR/binloom"
 CHECKSUM_STAMP="$INSTALL_DIR/.artifact-sha256"
+EXECUTABLE_STAMP="$INSTALL_DIR/.executable-sha256"
+RETAINED_ARTIFACT="$INSTALL_DIR/.artifact"
+TMP_PREFIX=".binloomw-tmp"
+# Matches MAX_DECOMPRESSED_BYTES in the Rust installer (512 MiB).
+MAX_DECOMPRESSED_BYTES=536870912
 
-if [ -x "$BINLOOM" ] &&
-    [ -f "$CHECKSUM_STAMP" ] &&
-    [ "$(cat "$CHECKSUM_STAMP")" = "$SHA256" ]; then
+# Trust model: binloom.lock is the only authority. The cache under .tools is
+# user-writable, so its stamps are never trusted on their own; every run
+# recomputes the hashes. That costs one sha256 of the executable (plus the
+# retained archive and its decompression for gz) per run, in exchange for never
+# executing modified bytes.
+#
+# Concurrency: there is no lock (flock is not portable to macOS). Concurrent
+# wrappers, and a concurrent `binloom install`, are safe because every publish
+# is an atomic rename of fully verified content and every cache hit is
+# re-verified, so the worst case is a redundant reinstall. Known limit: a writer
+# of the same user can still replace the executable between verification and
+# exec (also two wrappers whose locks name different artifacts for one version);
+# closing that needs supervision or digest-addressed paths, which this layout
+# does not have.
+
+fail() {
+    echo "error: $*" >&2
+    exit 1
+}
+
+# Mirrors the Rust verifier: an executable or cache directory owned by someone
+# else (root excepted) or writable by group/others is replaced or refused instead
+# of trusted. -prune keeps find from descending into directories.
+owned_and_private() {
+    [ -n "$(find "$1" -prune \( -user "$(id -u)" -o -user 0 \) ! -perm -020 ! -perm -002 2>/dev/null)" ]
+}
+
+check_dir() {
+    if [ -L "$1" ]; then
+        fail "refusing to use symlink: $1"
+    fi
+    if [ -e "$1" ] && [ ! -d "$1" ]; then
+        fail "expected a directory: $1"
+    fi
+    if [ -d "$1" ] && ! owned_and_private "$1"; then
+        fail "refusing cache directory $1: it must be owned by you and not group/other-writable; run: chmod go-w $1"
+    fi
+}
+
+check_file() {
+    if [ -L "$1" ]; then
+        fail "refusing to use symlink: $1"
+    fi
+    if [ -e "$1" ] && [ ! -f "$1" ]; then
+        fail "expected a regular file: $1"
+    fi
+}
+
+check_layout() {
+    check_dir "$TOOLS_DIR"
+    check_dir "$BINLOOM_DIR"
+    check_dir "$INSTALL_DIR"
+    check_file "$BINLOOM"
+    check_file "$CHECKSUM_STAMP"
+    check_file "$EXECUTABLE_STAMP"
+    check_file "$RETAINED_ARTIFACT"
+}
+
+# Hash of the decompressed stream, capped like the installer. Failures show up
+# as a hash mismatch against the verified executable.
+gz_sha256() {
+    gzip -dc "$1" | head -c $((MAX_DECOMPRESSED_BYTES + 1)) | sha256_file -
+}
+
+cache_valid() {
+    [ -f "$BINLOOM" ] && [ -f "$CHECKSUM_STAMP" ] && [ -f "$EXECUTABLE_STAMP" ] || return 1
+    owned_and_private "$BINLOOM" || return 1
+    [ "$(cat "$CHECKSUM_STAMP")" = "$SHA256" ] || return 1
+    exe_sha256=$(sha256_file "$BINLOOM" 2>/dev/null) || return 1
+    [ "$(cat "$EXECUTABLE_STAMP")" = "$exe_sha256" ] || return 1
+
+    case "$FORMAT" in
+        raw)
+            [ "$exe_sha256" = "$SHA256" ] || return 1
+            ;;
+        gz)
+            [ -f "$RETAINED_ARTIFACT" ] || return 1
+            # gz_sha256 stops at the cap, so a longer file could match as a truncated prefix.
+            [ "$(wc -c < "$BINLOOM")" -le "$MAX_DECOMPRESSED_BYTES" ] || return 1
+            [ "$(sha256_file "$RETAINED_ARTIFACT" 2>/dev/null)" = "$SHA256" ] || return 1
+            [ "$(gz_sha256 "$RETAINED_ARTIFACT" 2>/dev/null)" = "$exe_sha256" ] || return 1
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    # A verified executable that we cannot run is repaired when we own it.
+    [ -x "$BINLOOM" ] || chmod u+x "$BINLOOM" 2>/dev/null || return 1
+    [ -x "$BINLOOM" ]
+}
+
+check_layout
+
+if cache_valid; then
     exec "$BINLOOM" "$@"
 fi
 
-mkdir -p "$INSTALL_DIR"
+case "$FORMAT" in
+    gz | raw) ;;
+    *) fail "unsupported Binloom asset format: $FORMAT" ;;
+esac
 
-ARCHIVE=$(mktemp "$INSTALL_DIR/.download.XXXXXX")
-BINARY_TMP=$(mktemp "$INSTALL_DIR/.binloom.XXXXXX")
+# Create missing components with an explicit mode (umask 002 must not yield 0775).
+for dir in "$TOOLS_DIR" "$BINLOOM_DIR" "$INSTALL_DIR"; do
+    [ -e "$dir" ] || mkdir -m 755 "$dir" 2>/dev/null || [ -d "$dir" ] || fail "cannot create $dir"
+    check_dir "$dir"
+done
+
+# Sweep temp files abandoned by killed runs; skip those of live processes.
+for stale in "$INSTALL_DIR/$TMP_PREFIX".*; do
+    [ -L "$stale" ] && continue
+    [ -f "$stale" ] || continue
+    stale_pid=${stale##*/"$TMP_PREFIX".}
+    stale_pid=${stale_pid%%.*}
+    case "$stale_pid" in
+        "" | *[!0-9]*) continue ;;
+    esac
+    kill -0 "$stale_pid" 2>/dev/null || rm -f "$stale"
+done
+
+ARCHIVE=""
+BINARY_TMP=""
+ARTIFACT_STAMP_TMP=""
+EXECUTABLE_STAMP_TMP=""
 
 cleanup() {
-    rm -f "$ARCHIVE" "$BINARY_TMP"
+    for tmp in "$ARCHIVE" "$BINARY_TMP" "$ARTIFACT_STAMP_TMP" "$EXECUTABLE_STAMP_TMP"; do
+        if [ -n "$tmp" ]; then
+            rm -f "$tmp"
+        fi
+    done
 }
 
-trap cleanup EXIT HUP INT TERM
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
 
-download_file "$URL" "$ARCHIVE"
+ARCHIVE=$(mktemp "$INSTALL_DIR/$TMP_PREFIX.$$.XXXXXX")
+BINARY_TMP=$(mktemp "$INSTALL_DIR/$TMP_PREFIX.$$.XXXXXX")
+ARTIFACT_STAMP_TMP=$(mktemp "$INSTALL_DIR/$TMP_PREFIX.$$.XXXXXX")
+EXECUTABLE_STAMP_TMP=$(mktemp "$INSTALL_DIR/$TMP_PREFIX.$$.XXXXXX")
+
+download_file "$URL" "$ARCHIVE" ||
+    fail "cannot download Binloom $VERSION and the cached install is missing or failed verification; refusing to run unverified bytes"
 
 verify_file "$ARCHIVE" "$SHA256" "Binloom"
 
 case "$FORMAT" in
     gz)
-        gzip -dc "$ARCHIVE" > "$BINARY_TMP"
+        # Capped extraction first so an oversized archive stops at the cap; the
+        # full-stream integrity test only runs on streams that fit.
+        gzip -dc "$ARCHIVE" | head -c $((MAX_DECOMPRESSED_BYTES + 1)) > "$BINARY_TMP"
+        if [ "$(wc -c < "$BINARY_TMP")" -gt "$MAX_DECOMPRESSED_BYTES" ]; then
+            fail "Binloom archive expands beyond $MAX_DECOMPRESSED_BYTES bytes"
+        fi
+        gzip -t "$ARCHIVE" || fail "Binloom archive is not a valid gzip stream"
         ;;
     raw)
         cp "$ARCHIVE" "$BINARY_TMP"
         ;;
-    *)
-        echo "error: unsupported Binloom asset format: $FORMAT" >&2
-        exit 1
-        ;;
 esac
 
 chmod 755 "$BINARY_TMP"
-mv "$BINARY_TMP" "$BINLOOM"
-printf '%s\n' "$SHA256" > "$CHECKSUM_STAMP"
+printf '%s\n' "$SHA256" > "$ARTIFACT_STAMP_TMP"
+printf '%s\n' "$(sha256_file "$BINARY_TMP")" > "$EXECUTABLE_STAMP_TMP"
+chmod 644 "$ARCHIVE" "$ARTIFACT_STAMP_TMP" "$EXECUTABLE_STAMP_TMP"
 
-rm -f "$ARCHIVE"
+if command -v sync >/dev/null 2>&1; then
+    sync
+fi
+
+# Publish verified content with atomic renames. Interrupted states fail the
+# recomputation above and are repaired by the next run.
+check_dir "$INSTALL_DIR"
+if [ "$FORMAT" = "gz" ]; then
+    check_file "$RETAINED_ARTIFACT"
+    mv "$ARCHIVE" "$RETAINED_ARTIFACT"
+    ARCHIVE=""
+fi
+check_file "$BINLOOM"
+mv "$BINARY_TMP" "$BINLOOM"
+BINARY_TMP=""
+check_file "$EXECUTABLE_STAMP"
+mv "$EXECUTABLE_STAMP_TMP" "$EXECUTABLE_STAMP"
+EXECUTABLE_STAMP_TMP=""
+check_file "$CHECKSUM_STAMP"
+mv "$ARTIFACT_STAMP_TMP" "$CHECKSUM_STAMP"
+ARTIFACT_STAMP_TMP=""
+
+# Best effort: flush the renames (not a per-file fsync) before running.
+if command -v sync >/dev/null 2>&1; then
+    sync
+fi
+
+cleanup
 trap - EXIT HUP INT TERM
 
 exec "$BINLOOM" "$@"

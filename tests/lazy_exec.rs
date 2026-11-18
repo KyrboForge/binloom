@@ -543,7 +543,7 @@ fn rejects_symlinked_install_paths_without_writing_outside_the_project() {
 }
 
 #[test]
-fn reinstalls_a_cached_executable_without_execute_permissions() {
+fn checks_executability_for_the_effective_caller_without_widening_modes() {
     let project = tempfile::tempdir().unwrap();
     let root = project.path();
     let server = Server::start(SCRIPT, Duration::ZERO);
@@ -551,13 +551,30 @@ fn reinstalls_a_cached_executable_without_execute_permissions() {
     assert_ran_tool(exec_tool(root));
 
     let installed = version_dir(root).join(TOOL);
-    fs::set_permissions(&installed, fs::Permissions::from_mode(0o644)).unwrap();
-    assert_ran_tool(exec_tool(root));
-    assert_ne!(
-        fs::metadata(&installed).unwrap().permissions().mode() & 0o111,
-        0
-    );
-    assert_eq!(server.shutdown(), 2);
+    let set_mode =
+        |mode| fs::set_permissions(&installed, fs::Permissions::from_mode(mode)).unwrap();
+    let mode = || installed.symlink_metadata().unwrap().permissions().mode() & 0o7777;
+    // 0654 has group but not owner execute: the owner must not be treated as able to run it.
+    for (changed, repaired) in [
+        (0o644, 0o744),
+        (0o654, 0o754),
+        (0o700, 0o700),
+        (0o500, 0o500),
+        (0o755, 0o755),
+    ] {
+        set_mode(changed);
+        assert_ran_tool(exec_tool(root));
+        assert_eq!(mode(), repaired, "{changed:o}");
+    }
+
+    // Executables others could rewrite are replaced from a verified download; only these
+    // two replacements download again.
+    for writable in [0o775, 0o757] {
+        set_mode(writable);
+        assert_ran_tool(exec_tool(root));
+        assert_eq!(mode(), 0o755, "{writable:o}");
+    }
+    assert_eq!(server.shutdown(), 3);
 }
 
 #[test]
@@ -574,8 +591,10 @@ fn repairs_tampered_legacy_and_symlinked_executables_and_fails_closed_offline() 
     assert_ran_tool(exec_tool(root));
     assert_eq!(fs::read(&installed).unwrap(), SCRIPT);
 
+    // A legacy raw cache without the executable digest still verifies against the lock.
     fs::remove_file(version_dir(root).join(".executable-sha256")).unwrap();
     assert_ran_tool(exec_tool(root));
+    assert!(!version_dir(root).join(".executable-sha256").exists());
 
     let external = root.join("same-bytes");
     fs::write(&external, SCRIPT).unwrap();
@@ -584,7 +603,7 @@ fn repairs_tampered_legacy_and_symlinked_executables_and_fails_closed_offline() 
     symlink(&external, &installed).unwrap();
     assert_ran_tool(exec_tool(root));
     assert!(installed.symlink_metadata().unwrap().is_file());
-    assert_eq!(server.shutdown(), 4);
+    assert_eq!(server.shutdown(), 3);
 
     fs::write(&installed, tampered).unwrap();
     let output = exec_tool(root);
@@ -833,4 +852,217 @@ fn cargo_cache_hit_verifies_executable_without_needing_cargo() {
         "{}",
         stderr(&output)
     );
+}
+
+#[test]
+fn interrupted_publication_is_repaired_on_the_next_run() {
+    let server = Server::start(SCRIPT, Duration::ZERO);
+    for blocked in [TOOL, ".artifact-sha256"] {
+        let project = tempfile::tempdir().unwrap();
+        let root = project.path();
+        raw_project(root, &server);
+        // A non-empty directory makes the rename publishing this path fail.
+        let blocker = version_dir(root).join(blocked);
+        fs::create_dir_all(blocker.join("blocker")).unwrap();
+
+        let output = exec_tool(root);
+        assert!(!output.status.success(), "{blocked}");
+        assert!(output.stdout.is_empty());
+        assert!(stderr(&output).contains(blocked), "{}", stderr(&output));
+        assert_no_staging_files(root);
+
+        fs::remove_dir_all(&blocker).unwrap();
+        assert_ran_tool(exec_tool(root));
+        assert_eq!(fs::read(version_dir(root).join(TOOL)).unwrap(), SCRIPT);
+        assert_eq!(
+            fs::read_to_string(version_dir(root).join(".artifact-sha256"))
+                .unwrap()
+                .trim(),
+            checksum(SCRIPT)
+        );
+    }
+    assert_eq!(server.shutdown(), 4);
+}
+
+fn assert_no_staging_files(root: &Path) {
+    for entry in fs::read_dir(version_dir(root)).unwrap() {
+        let name = entry.unwrap().file_name();
+        assert!(
+            !name.to_string_lossy().starts_with(".binloom-tmp."),
+            "{name:?}"
+        );
+    }
+}
+
+#[test]
+fn failed_staging_keeps_the_previous_installation() {
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path();
+    let server = Server::start(SCRIPT, Duration::ZERO);
+    raw_project(root, &server);
+    assert_ran_tool(exec_tool(root));
+    let url = server.url.clone();
+    assert_eq!(server.shutdown(), 1);
+
+    let directory = version_dir(root);
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o555)).unwrap();
+    if fs::write(directory.join("probe"), b"").is_ok() {
+        // Privileged users bypass directory permissions; nothing to exercise here.
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o755)).unwrap();
+        return;
+    }
+    let lock = fs::read(root.join("binloom.lock")).unwrap();
+    let replacement = b"#!/bin/sh\necho replacement\n";
+    write_project(
+        root,
+        &[TOOL],
+        &url,
+        "raw",
+        &checksum(replacement),
+        &platform(),
+    );
+    let output = exec_tool(root);
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert_eq!(fs::read(directory.join(TOOL)).unwrap(), SCRIPT);
+
+    // The untouched installation still verifies offline once the lock is restored.
+    fs::write(root.join("binloom.lock"), lock).unwrap();
+    assert_ran_tool(exec_tool(root));
+}
+
+#[test]
+fn unexpected_file_types_at_managed_paths_are_replaced_without_following_links() {
+    let server = Server::start(SCRIPT, Duration::ZERO);
+    for (path, kind) in [
+        (".artifact-sha256", "fifo"),
+        (".artifact-sha256", "symlink"),
+        (TOOL, "fifo"),
+        (TOOL, "symlink"),
+    ] {
+        let project = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let root = project.path();
+        raw_project(root, &server);
+        assert_ran_tool(exec_tool(root));
+
+        let managed = version_dir(root).join(path);
+        let target = outside.path().join("target");
+        // The link target holds what the managed file should contain, which must not count.
+        fs::copy(&managed, &target).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::remove_file(&managed).unwrap();
+        if kind == "fifo" {
+            assert!(
+                Command::new("mkfifo")
+                    .arg(&managed)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        } else {
+            symlink(&target, &managed).unwrap();
+        }
+        let before = fs::read(&target).unwrap();
+
+        assert_ran_tool(exec_tool(root));
+        assert!(
+            managed.symlink_metadata().unwrap().is_file(),
+            "{path} {kind}"
+        );
+        assert_eq!(fs::read(&target).unwrap(), before);
+    }
+    assert_eq!(server.shutdown(), 8);
+}
+
+#[test]
+fn removes_abandoned_staging_files_without_following_symlinks() {
+    let project = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let root = project.path();
+    let server = Server::start(SCRIPT, Duration::ZERO);
+    raw_project(root, &server);
+    assert_ran_tool(exec_tool(root));
+
+    let directory = version_dir(root);
+    fs::write(directory.join(".binloom-tmp.file"), b"partial").unwrap();
+    fs::create_dir_all(directory.join(".binloom-tmp.dir/nested")).unwrap();
+    fs::write(directory.join(".binloom-tmp.dir/nested/file"), b"partial").unwrap();
+    fs::write(outside.path().join("keep"), b"outside").unwrap();
+    symlink(outside.path(), directory.join(".binloom-tmp.link")).unwrap();
+    // Wrapper staging files are not covered by the install lock and must survive.
+    fs::write(directory.join(".binloomw-tmp.1.abc"), b"wrapper").unwrap();
+
+    assert_ran_tool(exec_tool(root));
+    assert!(!directory.join(".binloom-tmp.file").exists());
+    assert!(!directory.join(".binloom-tmp.dir").exists());
+    assert!(
+        directory
+            .join(".binloom-tmp.link")
+            .symlink_metadata()
+            .is_ok()
+    );
+    assert_eq!(fs::read(outside.path().join("keep")).unwrap(), b"outside");
+    assert!(directory.join(".binloomw-tmp.1.abc").exists());
+    assert_eq!(server.shutdown(), 1);
+}
+
+#[test]
+fn replaced_install_lock_is_never_shared() {
+    let server = Server::start(SCRIPT, Duration::ZERO);
+    for replace_with_symlink in [false, true] {
+        let project = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let root = project.path();
+        raw_project(root, &server);
+        fs::create_dir_all(version_dir(root)).unwrap();
+        let lock_path = version_dir(root).join(".install.lock");
+        let held = fs::File::create(&lock_path).unwrap();
+        held.lock().unwrap();
+        let child = cli(root)
+            .args(["exec", TOOL])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        thread::sleep(Duration::from_millis(300));
+
+        let replacement = version_dir(root).join("replacement");
+        let outside_lock = outside.path().join("lock");
+        let new_lock = if replace_with_symlink {
+            fs::write(&outside_lock, b"").unwrap();
+            symlink(&outside_lock, &replacement).unwrap();
+            None
+        } else {
+            let file = fs::File::create(&replacement).unwrap();
+            file.lock().unwrap();
+            Some(file)
+        };
+        fs::rename(&replacement, &lock_path).unwrap();
+        drop(held);
+
+        if let Some(new_lock) = new_lock {
+            // The waiter must notice its inode was replaced and queue on the new one.
+            thread::sleep(Duration::from_millis(300));
+            let mut child = child;
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "exec proceeded while another process held the current lock"
+            );
+            drop(new_lock);
+            assert_ran_tool(child.wait_with_output().unwrap());
+        } else {
+            let output = child.wait_with_output().unwrap();
+            assert!(!output.status.success());
+            assert!(output.stdout.is_empty());
+            assert!(
+                stderr(&output).contains("symlink") && stderr(&output).contains(".install.lock"),
+                "{}",
+                stderr(&output)
+            );
+            assert!(fs::read(&outside_lock).unwrap().is_empty());
+        }
+    }
+    assert_eq!(server.shutdown(), 1);
 }

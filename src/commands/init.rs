@@ -206,6 +206,10 @@ version = "{}"
             env!("CARGO_PKG_VERSION")
         )));
         assert!(!content.contains("@BINLOOM_VERSION@"));
+        assert_eq!(
+            content,
+            include_str!("../binloomw.sh").replace("@BINLOOM_VERSION@", env!("CARGO_PKG_VERSION"))
+        );
     }
 
     #[test]
