@@ -233,7 +233,7 @@ gz_sha256() {
 # Mirrors the Rust verifier: an executable owned by someone else (root excepted)
 # or writable by group/others is replaced instead of run.
 owned_and_private() {
-    [ -n "$(find "$1" \( -user "$(id -u)" -o -user 0 \) ! -perm -022 2>/dev/null)" ]
+    [ -n "$(find "$1" \( -user "$(id -u)" -o -user 0 \) ! -perm -020 ! -perm -002 2>/dev/null)" ]
 }
 
 cache_valid() {

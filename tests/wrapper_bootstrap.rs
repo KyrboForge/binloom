@@ -628,17 +628,20 @@ fn writable_cached_executable_is_replaced_not_run() {
     let artifact = Artifact::new("good", "raw");
     fx.install("1.0.0", &artifact);
     let exe = fx.dir("1.0.0").join("binloom");
-    fs::set_permissions(&exe, fs::Permissions::from_mode(0o777)).unwrap();
-    let (output, _) = fx.run_offline();
-    assert_refused(&output, "good");
+    // Either write bit alone must be rejected, matching the Rust `mode & 0o022` rule.
+    for mode in [0o777, 0o775, 0o757] {
+        fs::set_permissions(&exe, fs::Permissions::from_mode(mode)).unwrap();
+        let (output, _) = fx.run_offline();
+        assert_refused(&output, "good");
 
-    let (output, requests) = fx.run(&artifact.body);
-    assert_ran(&output, "good");
-    assert_eq!(requests, ["/binloom"]);
-    assert_eq!(
-        fs::metadata(&exe).unwrap().permissions().mode() & 0o777,
-        0o755
-    );
+        let (output, requests) = fx.run(&artifact.body);
+        assert_ran(&output, "good");
+        assert_eq!(requests, ["/binloom"]);
+        assert_eq!(
+            fs::metadata(&exe).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+    }
 }
 
 #[test]

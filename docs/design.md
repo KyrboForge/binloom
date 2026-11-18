@@ -348,6 +348,11 @@ Known limits:
   executing the other's verified bytes.
 - Anyone who can rewrite both the executable and the lockfile controls what runs;
   the lockfile is trusted repository state.
+- Cache directories are trusted like the rest of the checkout: their ownership
+  and group/other write bits are not checked, so a user who can write into
+  `.tools/` (as into `binloom.lock`) can swap verified content. Common umasks
+  such as `002` create group-writable directories, so rejecting them would
+  break ordinary setups.
 - `bootstrap.sh` has no cache and fetches `SHA256SUMS` from the same release
   origin as the archive: it detects corruption, not a compromised release.
 - Windows is out of scope (#35).
