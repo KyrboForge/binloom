@@ -1,14 +1,12 @@
-use std::{
-    fs::{self, OpenOptions},
-    io::{self, Write},
-    path::Path,
-};
+use std::{fmt::Write, fs, io, path::Path};
 
 use anyhow::{Context, Result, ensure};
 
 use super::{install, update};
 use crate::{
-    common::{LOCKFILE, MANIFEST, project_root, validate_tool_name, validate_version},
+    common::{
+        LOCKFILE, MANIFEST, project_root, validate_tool_name, validate_version, write_atomically,
+    },
     domain::{
         manifest::Manifest,
         sources::{Source, bare_version},
@@ -63,13 +61,13 @@ fn restore(
     manifest: &[u8],
     lock_path: &Path,
     lockfile: Option<Vec<u8>>,
-) -> io::Result<()> {
-    fs::write(manifest_path, manifest)?;
+) -> Result<()> {
+    write_atomically(manifest_path, manifest)?;
 
     match lockfile {
-        Some(content) => fs::write(lock_path, content),
+        Some(content) => write_atomically(lock_path, &content),
         None => match fs::remove_file(lock_path) {
-            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error.into()),
             _ => Ok(()),
         },
     }
@@ -93,35 +91,41 @@ fn write_tool(
 
     let source = Source::try_from(source.to_owned()).map_err(anyhow::Error::msg)?;
 
-    let content = fs::read_to_string(path)?;
-    let mut file = OpenOptions::new().append(true).open(path)?;
+    let mut content = fs::read_to_string(path)?;
 
     if !content.ends_with('\n') {
-        writeln!(file)?;
+        content.push('\n');
     }
 
     if !content.ends_with("\n\n") {
-        writeln!(file)?;
+        content.push('\n');
     }
 
-    writeln!(file, "[tools.{name}]")?;
+    writeln!(content, "[tools.{name}]")?;
     writeln!(
-        file,
+        content,
         "version = {}",
         toml::Value::String(version.to_owned())
     )?;
-    writeln!(file, "source = {}", toml::Value::String(source.to_string()))?;
+    writeln!(
+        content,
+        "source = {}",
+        toml::Value::String(source.to_string())
+    )?;
     if let Some(asset) = asset {
-        writeln!(file, "asset = {}", toml::Value::String(asset.to_owned()))?;
+        writeln!(content, "asset = {}", toml::Value::String(asset.to_owned()))?;
     }
-    Ok(())
+    write_atomically(path, content.as_bytes())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
-        domain::lockfile::{LockedTool, Lockfile},
+        domain::{
+            lockfile::{LockedTool, Lockfile},
+            platform::Platform,
+        },
         download,
     };
 
@@ -154,6 +158,7 @@ mod tests {
                         tag: Some("v1.2.3".to_owned()),
                         sha256: None,
                         artifacts: Default::default(),
+                        ..LockedTool::default()
                     },
                 );
                 updated.write(&lock_path)?;
@@ -161,7 +166,7 @@ mod tests {
                 assert_ne!(fs::read(&lock_path).unwrap(), lockfile);
 
                 // Missing artifacts fail installation before any download.
-                install::install_from(directory.path(), &download::client())
+                install::install_from(directory.path(), &download::client(), Platform::current()?)
             },
         )
         .unwrap_err();

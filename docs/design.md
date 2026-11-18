@@ -107,7 +107,7 @@ a warning naming them. Zero or multiple candidates remaining after these
 preferences fail before replacing the lockfile.
 
 An explicit `asset` pattern bypasses automatic matching and must resolve to
-exactly one asset for every supported platform.
+exactly one asset for every target of the tool.
 
 The `asset` field is valid only for GitHub and GitLab release sources.
 
@@ -142,6 +142,26 @@ minimum-release-age-minutes = 1440
 
 The value may be set to `0` when immediate releases are explicitly desired.
 
+Projects may declare their supported platforms explicitly
+([ADR-0001](adr/0001-explicit-project-and-tool-targets.md)):
+
+```toml
+[platforms]
+targets = ["macos-aarch64", "linux-x86_64"]
+
+[tools.example]
+version = "1.2.3"
+source = "github:owner/example"
+targets = ["linux-x86_64"]
+```
+
+Accepted ids are `macos-aarch64`, `macos-x86_64`, `linux-aarch64`, and
+`linux-x86_64`. Lists must be non-empty and free of duplicates; order is
+irrelevant and Binloom uses that canonical order. A tool inherits the project
+targets, and its own `targets` must be a subset of them; tool targets without
+`[platforms]` are rejected. Without `[platforms]`, every tool targets all four
+platforms and the lockfile is unchanged from earlier releases.
+
 ## Lockfile
 
 `binloom.lock` is generated and committed. Release entries record the tag and
@@ -171,6 +191,33 @@ checksum-source = "digest"
 
 Tool entries use the same `artifacts.<platform>` shape under
 `[tools.<name>]`. URLs use HTTPS and checksums are lowercase SHA-256 hex.
+
+For a project with `[platforms]`, the lockfile also records the resolver
+inputs so that `install` and `exec` can detect a stale lock: a top-level
+`[platforms] targets` list and, per tool, its effective `targets` plus the
+manifest `asset-pattern` when one is set. Release tools then lock exactly one
+artifact per target; Binloom's own artifacts still cover all four platforms.
+
+```toml
+[platforms]
+targets = [
+    "macos-aarch64",
+    "linux-x86_64",
+]
+
+[tools.example]
+version = "1.2.3"
+source = "github:owner/example"
+tag = "v1.2.3"
+targets = ["linux-x86_64"]
+asset-pattern = "example_{version}_{os}_{arch}.gz"
+
+[tools.example.artifacts.linux-x86_64]
+asset = "example_1.2.3_linux_x86_64.gz"
+url = "..."
+sha256 = "..."
+format = "gz"
+```
 
 Cargo entries instead record one checksum for the platform-independent source
 archive:
@@ -220,6 +267,15 @@ binloom path
 - `update --self` updates only Binloom and wrapper metadata.
 - `exec` prepends `.tools/.bin` to `PATH` for one process. It does not mutate
   the user's shell.
+- With `[platforms]`, `install` fails before any change on a host outside the
+  project targets and skips (and reports) tools that exclude the host; `exec`
+  of such a tool fails without falling back to `PATH`. Neither command
+  rewrites an existing lockfile; a lock whose targets or asset patterns no
+  longer match the manifest must be regenerated with `update`.
+- `update` resolves every tool for its full target set before replacing any
+  file; lockfile and manifest writes are atomic. `update <tool>` refuses to run
+  when `[platforms] targets` changed, because the whole lock must be
+  regenerated.
 - `list` reports configured versions and sources.
 - `path` prints the absolute `.tools/.bin` path.
 

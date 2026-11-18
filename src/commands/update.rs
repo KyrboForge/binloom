@@ -1,16 +1,16 @@
 use std::{collections::BTreeMap, path::Path};
 
 use crate::{
-    common::{LOCKFILE, MANIFEST, project_root},
+    common::{LOCKFILE, MANIFEST, project_root, write_atomically},
     domain::{
-        lockfile::Lockfile,
+        lockfile::{LockedPlatforms, Lockfile},
         manifest::{self, Manifest, Tool},
         resolve::{resolve_binloom, resolve_tool},
         sources::Source,
     },
     download,
 };
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 
 pub(crate) fn update(tool_name: Option<&str>) -> Result<()> {
     let root = project_root()?;
@@ -58,6 +58,14 @@ fn update_tools(root: &Path, tool_name: Option<&str>, latest: bool) -> Result<()
 
             let lockfile = Lockfile::try_from(lock_path.as_path())
                 .context("failed to load binloom.lock; run `binloom update` first")?;
+            ensure!(
+                manifest.project_targets()
+                    == lockfile
+                        .platforms
+                        .as_ref()
+                        .map(|platforms| platforms.targets.as_slice()),
+                "[platforms] targets changed; run `binloom update` to regenerate binloom.lock"
+            );
 
             (vec![(name, tool)], lockfile)
         }
@@ -82,7 +90,13 @@ fn update_tools(root: &Path, tool_name: Option<&str>, latest: bool) -> Result<()
             Some(tool.version.as_str())
         };
 
-        let locked = resolve_tool(name, tool, version, minimum_age, &client)?;
+        let targets = manifest.tool_targets(tool);
+        let mut locked = resolve_tool(name, tool, targets, version, minimum_age, &client)?;
+        // Explicit projects snapshot the resolver inputs so drift is detectable.
+        if manifest.platforms.is_some() {
+            locked.targets = Some(targets.to_vec());
+            locked.asset_pattern.clone_from(&tool.asset);
+        }
 
         versions.insert(name.to_owned(), locked.version.clone());
         lockfile.tools.insert(name.to_owned(), locked);
@@ -110,16 +124,27 @@ fn update_tools(root: &Path, tool_name: Option<&str>, latest: bool) -> Result<()
         None
     };
 
+    lockfile.platforms = manifest.project_targets().map(|targets| LockedPlatforms {
+        targets: targets.to_vec(),
+    });
+
+    // Every resolution and manifest edit succeeds before any file is replaced.
+    let updated_manifest = latest
+        .then(|| {
+            manifest::render_versions(
+                manifest_path.as_path(),
+                binloom_version.as_deref(),
+                versions
+                    .iter()
+                    .map(|(name, version)| (name.as_str(), version.as_str())),
+            )
+        })
+        .transpose()?;
+
     lockfile.write(lock_path.as_path())?;
 
-    if latest {
-        manifest::update_versions(
-            manifest_path.as_path(),
-            binloom_version.as_deref(),
-            versions
-                .iter()
-                .map(|(name, version)| (name.as_str(), version.as_str())),
-        )?;
+    if let Some(content) = updated_manifest {
+        write_atomically(manifest_path.as_path(), content.as_bytes())?;
     }
 
     println!("Updated {}", lock_path.display());
@@ -156,9 +181,10 @@ pub(crate) fn update_binloom() -> Result<()> {
     let version = locked.version.clone();
     lockfile.binloom = Some(locked);
     lockfile.wrapper = Some(wrapper);
+    let updated_manifest = manifest::render_versions(manifest_path.as_path(), Some(&version), [])?;
     lockfile.write(lock_path.as_path())?;
 
-    manifest::update_versions(manifest_path.as_path(), Some(&version), [])?;
+    write_atomically(manifest_path.as_path(), updated_manifest.as_bytes())?;
 
     println!("Updated Binloom in {}", lock_path.display());
 
@@ -218,8 +244,7 @@ mod tests {
                 version: "0.1.0".to_owned(),
                 source: "github:KyrboForge/binloom".to_owned(),
                 tag: Some("v0.1.0".to_owned()),
-                sha256: None,
-                artifacts: BTreeMap::new(),
+                ..LockedTool::default()
             }),
             ..Lockfile::default()
         };
@@ -227,5 +252,28 @@ mod tests {
         assert_eq!(lock_target(Some(&existing), "lefthook"), Some("lefthook"));
         assert_eq!(lock_target(None, "lefthook"), None);
         assert_eq!(lock_target(Some(&Lockfile::default()), "lefthook"), None);
+    }
+
+    #[test]
+    fn single_tool_update_rejects_changed_project_targets_before_writing() {
+        let directory = tempfile::tempdir().unwrap();
+        let manifest = "manifest-version = 1\n[binloom]\nversion = \"0.1.0\"\n\
+            [platforms]\ntargets = [\"linux-x86_64\"]\n\
+            [tools.tool]\nversion = \"1.0.0\"\nsource = \"github:owner/tool\"\n";
+        let lock = "lock-version = 1\n";
+        std::fs::write(directory.path().join(MANIFEST), manifest).unwrap();
+        std::fs::write(directory.path().join(LOCKFILE), lock).unwrap();
+
+        let error = update_tools(directory.path(), Some("tool"), false).unwrap_err();
+
+        assert!(error.to_string().contains("[platforms] targets changed"));
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join(MANIFEST)).unwrap(),
+            manifest
+        );
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join(LOCKFILE)).unwrap(),
+            lock
+        );
     }
 }

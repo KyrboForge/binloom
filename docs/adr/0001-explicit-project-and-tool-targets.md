@@ -4,7 +4,7 @@
 - **Date:** 2026-11-17
 - **Decision owners:** Binloom maintainers
 - **Related:** [ADR-0002](0002-linux-gnu-and-musl-targets.md), [ADR-0003](0003-cli-first-internal-install-core.md), [#36](https://github.com/KyrboForge/binloom/issues/36), [#38](https://github.com/KyrboForge/binloom/issues/38), [#40](https://github.com/KyrboForge/binloom/issues/40)
-- **Implementation status:** Not implemented by this ADR; this change is documentation only.
+- **Implementation status:** Implemented by [#36](https://github.com/KyrboForge/binloom/issues/36) for the four legacy targets (`macos-aarch64`, `macos-x86_64`, `linux-aarch64`, `linux-x86_64`); GNU/musl and Windows targets remain with [ADR-0002](0002-linux-gnu-and-musl-targets.md) and later work, and the upgrade transition with [#38](https://github.com/KyrboForge/binloom/issues/38).
 
 ## Context
 

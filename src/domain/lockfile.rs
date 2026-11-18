@@ -1,20 +1,25 @@
 use crate::{
-    common::{validate_tool_name, validate_version},
-    domain::sources::Source,
+    common::{validate_tool_name, validate_version, write_atomically},
+    domain::{
+        platform::{Platform, canonical_targets},
+        sources::Source,
+    },
 };
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::Write;
 use std::path::Path;
-use tempfile::NamedTempFile;
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Lockfile {
     #[serde(rename = "lock-version")]
     pub(crate) version: u32,
+
+    /// Declared project targets; absent in legacy locks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) platforms: Option<LockedPlatforms>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) binloom: Option<LockedTool>,
@@ -28,6 +33,12 @@ pub(crate) struct Lockfile {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct LockedPlatforms {
+    pub(crate) targets: Vec<Platform>,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct LockedTool {
     pub(crate) version: String,
     pub(crate) source: String,
@@ -37,6 +48,18 @@ pub(crate) struct LockedTool {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) sha256: Option<String>,
+
+    /// Effective targets of a tool in an explicit-target project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) targets: Option<Vec<Platform>>,
+
+    /// Snapshot of the manifest asset pattern in an explicit-target project.
+    #[serde(
+        default,
+        rename = "asset-pattern",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) asset_pattern: Option<String>,
 
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) artifacts: BTreeMap<String, LockedArtifact>,
@@ -93,6 +116,7 @@ impl Default for Lockfile {
     fn default() -> Self {
         Self {
             version: 1,
+            platforms: None,
             binloom: None,
             tools: BTreeMap::new(),
             wrapper: None,
@@ -124,7 +148,7 @@ impl TryFrom<&Path> for Lockfile {
         let content = fs::read_to_string(path)
             .with_context(|| format!("failed to read {}", path.display()))?;
 
-        let lockfile: Self = toml::from_str(&content)
+        let mut lockfile: Self = toml::from_str(&content)
             .with_context(|| format!("failed to parse {}", path.display()))?;
 
         if lockfile.version != 1 {
@@ -132,6 +156,15 @@ impl TryFrom<&Path> for Lockfile {
         }
 
         lockfile.validate()?;
+        // Compare locked targets with the manifest in canonical order.
+        if let Some(platforms) = &mut lockfile.platforms {
+            platforms.targets.sort();
+        }
+        for tool in lockfile.tools.values_mut() {
+            if let Some(targets) = &mut tool.targets {
+                targets.sort();
+            }
+        }
         Ok(lockfile)
     }
 }
@@ -140,51 +173,26 @@ impl Lockfile {
     pub(crate) fn write(&self, path: &Path) -> Result<()> {
         let content = Toml::try_from(self)?;
 
-        let parent = path
-            .parent()
-            .filter(|path| !path.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-
-        let mut temporary = NamedTempFile::new_in(parent).with_context(|| {
-            format!(
-                "failed to create temporary lockfile in {}",
-                parent.display()
-            )
-        })?;
-
-        temporary
-            .write_all(content.as_bytes())
-            .context("failed to write temporary lockfile")?;
-
-        temporary
-            .as_file()
-            .sync_all()
-            .context("failed to sync temporary lockfile")?;
-
-        temporary
-            .persist(path)
-            .map_err(|error| error.error)
-            .with_context(|| format!("failed to replace {}", path.display()))?;
-
-        #[cfg(unix)]
-        {
-            let directory = fs::File::open(parent)
-                .with_context(|| format!("failed to open {}", parent.display()))?;
-
-            directory
-                .sync_all()
-                .with_context(|| format!("failed to sync {}", parent.display()))?;
-        }
-
-        Ok(())
+        write_atomically(path, content.as_bytes())
     }
 
     fn validate(&self) -> Result<()> {
+        let project = self
+            .platforms
+            .as_ref()
+            .map(|platforms| canonical_targets(&platforms.targets))
+            .transpose()
+            .context("invalid [platforms] targets in lockfile")?;
+
         if let Some(binloom) = &self.binloom {
             LockedTool::validate_locked_tool(binloom).context("invalid Binloom lock entry")?;
             ensure!(
                 !binloom.source.starts_with("cargo:"),
                 "Binloom cannot use a Cargo source"
+            );
+            ensure!(
+                binloom.targets.is_none() && binloom.asset_pattern.is_none(),
+                "Binloom lock entry must not have targets or an asset pattern"
             );
         }
         if let Some(binloom) = &self.binloom {
@@ -198,6 +206,8 @@ impl Lockfile {
         for (name, tool) in &self.tools {
             validate_tool_name(name)?;
             LockedTool::validate_locked_tool(tool)
+                .with_context(|| format!("invalid lock entry for tool {name}"))?;
+            tool.validate_targets(project.as_deref())
                 .with_context(|| format!("invalid lock entry for tool {name}"))?;
         }
 
@@ -246,6 +256,34 @@ impl TryFrom<&str> for ArtifactFormat {
 }
 
 impl LockedTool {
+    fn validate_targets(&self, project: Option<&[Platform]>) -> Result<()> {
+        let Some(project) = project else {
+            ensure!(
+                self.targets.is_none() && self.asset_pattern.is_none(),
+                "targets and asset-pattern require [platforms] targets"
+            );
+            return Ok(());
+        };
+
+        let targets = self
+            .targets
+            .as_deref()
+            .context("tool is missing targets required by [platforms]")?;
+        let targets = canonical_targets(targets).context("invalid targets")?;
+        if let Some(target) = targets.iter().find(|target| !project.contains(target)) {
+            bail!("target `{target}` is not in [platforms] targets");
+        }
+        if self.tag.is_some() {
+            let expected: BTreeSet<String> = targets.iter().map(ToString::to_string).collect();
+            ensure!(
+                self.artifacts.keys().eq(expected.iter()),
+                "release artifacts must match targets"
+            );
+        }
+
+        Ok(())
+    }
+
     fn validate_locked_tool(tool: &Self) -> Result<()> {
         validate_version(&tool.version)?;
 
@@ -312,6 +350,7 @@ mod tests {
                 tag: Some("v2.1.10".to_owned()),
                 sha256: None,
                 artifacts,
+                ..LockedTool::default()
             },
         );
 
@@ -371,6 +410,7 @@ mod tests {
                 tag: Some("v0.1.0".to_owned()),
                 sha256: None,
                 artifacts,
+                ..LockedTool::default()
             }),
             ..Lockfile::default()
         };
@@ -456,6 +496,7 @@ artifacts = {}
             tag: Some("v1.0.0".to_owned()),
             sha256: None,
             artifacts: BTreeMap::new(),
+            ..LockedTool::default()
         };
 
         let mut lockfile = Lockfile::default();
@@ -553,6 +594,7 @@ artifacts = {}
                 tag: None,
                 sha256: Some("a".repeat(64)),
                 artifacts: BTreeMap::new(),
+                ..LockedTool::default()
             },
         );
 
@@ -580,6 +622,7 @@ artifacts = {}
                 tag: None,
                 sha256: None,
                 artifacts: BTreeMap::new(),
+                ..LockedTool::default()
             },
         );
 
@@ -596,5 +639,109 @@ artifacts = {}
         lockfile.tools.get_mut("tool").unwrap().tag = None;
 
         assert!(Toml::try_from(&lockfile).is_ok());
+    }
+
+    const EXPLICIT_LOCK: &str = r#"lock-version = 1
+
+[platforms]
+targets = [
+    "macos-aarch64",
+    "linux-x86_64",
+]
+
+[tools.tool]
+version = "1.0.0"
+source = "github:owner/tool"
+tag = "v1.0.0"
+targets = ["linux-x86_64"]
+asset-pattern = "tool-{os}-{arch}"
+
+[tools.tool.artifacts.linux-x86_64]
+asset = "tool-linux-x86_64"
+url = "https://example.com/tool"
+sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+format = "raw"
+checksum-source = "digest"
+"#;
+
+    #[test]
+    fn roundtrips_explicit_targets_deterministically() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("binloom.lock");
+        // Input order does not matter; output is canonical.
+        fs::write(
+            &path,
+            EXPLICIT_LOCK.replace(
+                "[\n    \"macos-aarch64\",\n    \"linux-x86_64\",\n]",
+                "[\"linux-x86_64\", \"macos-aarch64\"]",
+            ),
+        )
+        .unwrap();
+
+        let lockfile = Lockfile::try_from(path.as_path()).unwrap();
+        assert_eq!(
+            lockfile.platforms.as_ref().unwrap().targets,
+            [Platform::MacosAarch64, Platform::LinuxX86_64]
+        );
+        assert_eq!(
+            lockfile.tools["tool"].asset_pattern.as_deref(),
+            Some("tool-{os}-{arch}")
+        );
+
+        lockfile.write(&path).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), EXPLICIT_LOCK);
+    }
+
+    #[test]
+    fn rejects_inconsistent_lock_targets() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("binloom.lock");
+        let cases = [
+            (
+                EXPLICIT_LOCK.replace(
+                    "[platforms]\ntargets = [\n    \"macos-aarch64\",\n    \"linux-x86_64\",\n]\n\n",
+                    "",
+                ),
+                "targets and asset-pattern require [platforms] targets",
+            ),
+            (
+                EXPLICIT_LOCK.replace("targets = [\"linux-x86_64\"]\n", ""),
+                "tool is missing targets required by [platforms]",
+            ),
+            (
+                EXPLICIT_LOCK.replace(
+                    "targets = [\"linux-x86_64\"]\n",
+                    "targets = [\"linux-x86_64\", \"linux-aarch64\"]\n",
+                ),
+                "target `linux-aarch64` is not in [platforms] targets",
+            ),
+            (
+                EXPLICIT_LOCK.replace(
+                    "targets = [\"linux-x86_64\"]\n",
+                    "targets = [\"macos-aarch64\"]\n",
+                ),
+                "release artifacts must match targets",
+            ),
+            (
+                EXPLICIT_LOCK.replace(
+                    "\"macos-aarch64\",\n    \"linux-x86_64\"",
+                    "\"linux-x86_64\",\n    \"linux-x86_64\"",
+                ),
+                "duplicate target `linux-x86_64`",
+            ),
+            (
+                EXPLICIT_LOCK.replace("[\"linux-x86_64\"]", "[\"linux-x86_64-gnu\"]"),
+                "unknown target `linux-x86_64-gnu`",
+            ),
+        ];
+
+        for (content, expected) in cases {
+            fs::write(&path, &content).unwrap();
+            let error = Lockfile::try_from(path.as_path()).unwrap_err();
+            assert!(
+                format!("{error:#}").contains(expected),
+                "{content}: {error:#}"
+            );
+        }
     }
 }

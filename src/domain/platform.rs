@@ -1,7 +1,11 @@
-use anyhow::{Result, bail};
+use anyhow::{Result, bail, ensure};
+use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Release target id. Variant order is the canonical target order used for
+/// sorting and serialization; new ids (for example ABI variants) are new variants.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(try_from = "String", into = "String")]
 pub(crate) enum Platform {
     MacosAarch64,
     MacosX86_64,
@@ -58,6 +62,20 @@ impl Platform {
     }
 }
 
+/// Returns `targets` in canonical order, rejecting empty and duplicate lists
+/// instead of silently de-duplicating them.
+pub(crate) fn canonical_targets(targets: &[Platform]) -> Result<Vec<Platform>> {
+    ensure!(!targets.is_empty(), "targets must not be empty");
+
+    let mut canonical = targets.to_vec();
+    canonical.sort();
+    if let Some(pair) = canonical.windows(2).find(|pair| pair[0] == pair[1]) {
+        bail!("duplicate target `{}`", pair[0]);
+    }
+
+    Ok(canonical)
+}
+
 /// Case-insensitive token match: `alias` must not be glued to other
 /// alphanumerics, so `x64` never matches inside `x64ish` and `arm64` never
 /// matches `aarch64`-only names by accident.
@@ -90,6 +108,26 @@ impl TryFrom<(&str, &str)> for Platform {
     }
 }
 
+impl TryFrom<String> for Platform {
+    type Error = anyhow::Error;
+
+    fn try_from(id: String) -> Result<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|platform| platform.to_string() == id)
+            .ok_or_else(|| {
+                let supported = Self::ALL.map(|platform| platform.to_string()).join(", ");
+                anyhow::anyhow!("unknown target `{id}`; supported targets: {supported}")
+            })
+    }
+}
+
+impl From<Platform> for String {
+    fn from(platform: Platform) -> Self {
+        platform.to_string()
+    }
+}
+
 impl Display for Platform {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
@@ -118,6 +156,56 @@ mod tests {
             Platform::LinuxX86_64
         );
         assert_eq!(Platform::MacosAarch64.to_string(), "macos-aarch64");
+    }
+
+    #[test]
+    fn parses_canonical_target_ids_in_canonical_order() {
+        let ids = Platform::ALL.map(|platform| platform.to_string());
+
+        assert_eq!(
+            ids,
+            [
+                "macos-aarch64",
+                "macos-x86_64",
+                "linux-aarch64",
+                "linux-x86_64"
+            ]
+        );
+        for (platform, id) in Platform::ALL.into_iter().zip(ids) {
+            assert_eq!(Platform::try_from(id).unwrap(), platform);
+        }
+        assert!(Platform::ALL.is_sorted());
+        for id in ["windows-x86_64", "linux-x86_64-gnu", "Linux-x86_64", ""] {
+            let error = Platform::try_from(id.to_owned()).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "unknown target `{id}`; supported targets: macos-aarch64, macos-x86_64, linux-aarch64, linux-x86_64"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn canonicalizes_target_lists() {
+        assert_eq!(
+            canonical_targets(&[Platform::LinuxX86_64, Platform::MacosAarch64]).unwrap(),
+            [Platform::MacosAarch64, Platform::LinuxX86_64]
+        );
+        assert_eq!(
+            canonical_targets(&[]).unwrap_err().to_string(),
+            "targets must not be empty"
+        );
+        assert_eq!(
+            canonical_targets(&[
+                Platform::LinuxX86_64,
+                Platform::MacosAarch64,
+                Platform::LinuxX86_64
+            ])
+            .unwrap_err()
+            .to_string(),
+            "duplicate target `linux-x86_64`"
+        );
     }
 
     #[test]

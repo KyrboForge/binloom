@@ -5,6 +5,16 @@
   "type": "object",
   "additionalProperties": false,
   "required": ["manifest-version", "binloom"],
+  "$defs": {
+    "targets": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "enum": ["macos-aarch64", "macos-x86_64", "linux-aarch64", "linux-x86_64"]
+      }
+    }
+  },
   "properties": {
     "manifest-version": {
       "type": "integer",
@@ -20,6 +30,17 @@
           "type": "string",
           "minLength": 1,
           "description": "Pinned Binloom version."
+        }
+      }
+    },
+    "platforms": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["targets"],
+      "properties": {
+        "targets": {
+          "$ref": "#/$defs/targets",
+          "description": "Platforms this project supports. Without this table every tool is locked for all four platforms."
         }
       }
     },
@@ -56,6 +77,10 @@
             "type": "string",
             "minLength": 1,
             "description": "Optional release asset pattern. Supports {version}, {os}, {arch}, and {target}."
+          },
+          "targets": {
+            "$ref": "#/$defs/targets",
+            "description": "Optional subset of [platforms] targets for this tool. Defaults to every project target; requires [platforms]."
           }
         },
         "allOf": [

@@ -16,11 +16,13 @@ struct ReleaseRequest<'a> {
     name: &'a str,
     source: &'a Source,
     asset_pattern: Option<&'a str>,
+    targets: &'a [Platform],
 }
 
 pub(crate) fn resolve_tool(
     name: &str,
     tool: &Tool,
+    targets: &[Platform],
     version: Option<&str>,
     minimum_age_minutes: u64,
     client: &Client,
@@ -48,7 +50,7 @@ pub(crate) fn resolve_tool(
             source: source.to_string(),
             tag: None,
             sha256: Some(resolved.checksum),
-            artifacts: BTreeMap::new(),
+            ..LockedTool::default()
         });
     }
 
@@ -65,6 +67,7 @@ pub(crate) fn resolve_tool(
             name,
             source: &tool.source,
             asset_pattern: tool.asset.as_deref(),
+            targets,
         },
         &release,
         minimum_age_minutes,
@@ -141,8 +144,8 @@ fn resolve_release(
     let version = version_from_tag(&release.tag, request.name)?;
     let mut artifacts = BTreeMap::new();
     let mut emitted_warnings = BTreeSet::new();
-    let mut selected = Vec::with_capacity(Platform::ALL.len());
-    for platform in Platform::ALL {
+    let mut selected = Vec::with_capacity(request.targets.len());
+    for &platform in request.targets {
         let asset = match request.asset_pattern {
             Some(pattern) => release.find_asset_by_pattern(pattern, &version, platform)?,
             None => release.find_asset(request.name, platform, &mut emitted_warnings)?,
@@ -169,8 +172,8 @@ fn resolve_release(
         version,
         source: request.source.to_string(),
         tag: Some(release.tag.clone()),
-        sha256: None,
         artifacts,
+        ..LockedTool::default()
     })
 }
 
@@ -326,6 +329,7 @@ fn resolve_binloom_release(
             name: "binloom",
             source,
             asset_pattern: None,
+            targets: &Platform::ALL,
         },
         release,
         minimum_age_minutes,
@@ -473,6 +477,7 @@ mod tests {
                     name: "binloom",
                     source: &source,
                     asset_pattern: None,
+                    targets: &Platform::ALL,
                 },
                 &release,
                 0,
@@ -527,6 +532,7 @@ mod tests {
                 name: "gitleaks",
                 source: &Source::try_from("github:gitleaks/gitleaks".to_owned()).unwrap(),
                 asset_pattern: pattern,
+                targets: &Platform::ALL,
             },
             &gitleaks_release(),
             0,
@@ -675,6 +681,77 @@ mod tests {
             ensure_platform_specific_assets("tool", "1.0.0", &[(Platform::MacosAarch64, &x86_64)])
                 .is_err()
         );
+    }
+
+    fn resolve_targets(
+        assets: &[&str],
+        pattern: Option<&str>,
+        targets: &[Platform],
+    ) -> anyhow::Result<LockedTool> {
+        let release = Release {
+            tag: "v1.0.0".to_owned(),
+            published_at: Some("2026-01-01T00:00:00Z".to_owned()),
+            assets: assets
+                .iter()
+                .map(|name| ReleaseAsset {
+                    sha256: Some("a".repeat(64)),
+                    ..asset(name)
+                })
+                .collect(),
+        };
+        resolve_release(
+            ReleaseRequest {
+                name: "tool",
+                source: &Source::try_from("github:owner/tool".to_owned()).unwrap(),
+                asset_pattern: pattern,
+                targets,
+            },
+            &release,
+            0,
+            &download::client(),
+            &mut BTreeMap::new(),
+        )
+    }
+
+    #[test]
+    fn resolves_exactly_the_requested_targets() {
+        let linux = ["tool-linux-arm64.tar.gz", "tool-linux-x64.tar.gz"];
+        let locked = resolve_targets(
+            &linux,
+            None,
+            &[Platform::LinuxAarch64, Platform::LinuxX86_64],
+        )
+        .unwrap();
+        assert_eq!(
+            locked.artifacts.keys().collect::<Vec<_>>(),
+            ["linux-aarch64", "linux-x86_64"]
+        );
+
+        // A required target without an artifact fails instead of being dropped.
+        let error = resolve_targets(
+            &linux,
+            None,
+            &[Platform::MacosAarch64, Platform::LinuxX86_64],
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("macos-aarch64"), "{error:#}");
+    }
+
+    #[test]
+    fn resolves_universal_macos_asset_for_macos_only_targets() {
+        let locked = resolve_targets(
+            &["tool-universal-apple-darwin.tar.gz"],
+            Some("tool-{target}.tar.gz"),
+            &[Platform::MacosAarch64, Platform::MacosX86_64],
+        )
+        .unwrap();
+        assert!(
+            locked
+                .artifacts
+                .values()
+                .all(|artifact| artifact.asset == "tool-universal-apple-darwin.tar.gz")
+        );
+        assert_eq!(locked.artifacts.len(), 2);
     }
 
     #[test]
@@ -864,6 +941,7 @@ mod tests {
             tag: None,
             sha256: Some(resolved.checksum),
             artifacts: BTreeMap::new(),
+            ..LockedTool::default()
         };
 
         assert_eq!(locked.version, "1.2.3");
