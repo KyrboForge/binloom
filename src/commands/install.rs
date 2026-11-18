@@ -88,10 +88,10 @@ pub(super) fn install_from(root: &Path, client: &download::Client, host: Platfor
     let lock_path = root.join(LOCKFILE);
 
     let manifest = Manifest::try_from(manifest_path.as_path())?;
+    ensure_project_host(manifest.project_targets(), host)?;
     let lockfile = Lockfile::try_from(lock_path.as_path())?;
 
     manifest.ensure_matches_lockfile(&lockfile)?;
-    ensure_project_host(manifest.project_targets(), host)?;
 
     for name in lockfile.tools.keys() {
         ensure_unreserved_tool_name(name)?;

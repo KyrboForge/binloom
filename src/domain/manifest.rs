@@ -71,7 +71,13 @@ impl TryFrom<&Path> for Manifest {
         let content = fs::read_to_string(path)
             .with_context(|| format!("failed to read {}", path.display()))?;
 
-        let mut manifest: Self = toml::from_str(&content)
+        Self::parse(&content, path)
+    }
+}
+
+impl Manifest {
+    pub(crate) fn parse(content: &str, path: &Path) -> Result<Self> {
+        let mut manifest: Self = toml::from_str(content)
             .with_context(|| format!("failed to parse {}", path.display()))?;
 
         if manifest.version != 1 {
@@ -117,9 +123,7 @@ impl TryFrom<&Path> for Manifest {
         }
         Ok(manifest)
     }
-}
 
-impl Manifest {
     /// Declared project targets in canonical order, or `None` for legacy projects.
     pub(crate) fn project_targets(&self) -> Option<&[Platform]> {
         self.platforms

@@ -1,5 +1,5 @@
 use crate::{
-    common::{validate_tool_name, validate_version, write_atomically},
+    common::{validate_tool_name, validate_version, write_manifest_and_lock, write_new_atomically},
     domain::{
         platform::{Platform, canonical_targets},
         sources::Source,
@@ -170,10 +170,21 @@ impl TryFrom<&Path> for Lockfile {
 }
 
 impl Lockfile {
+    #[cfg(test)]
     pub(crate) fn write(&self, path: &Path) -> Result<()> {
         let content = Toml::try_from(self)?;
 
-        write_atomically(path, content.as_bytes())
+        crate::common::write_atomically(path, content.as_bytes())
+    }
+
+    pub(crate) fn write_new(&self, path: &Path) -> Result<()> {
+        let content = Toml::try_from(self)?;
+        write_new_atomically(path, content.as_bytes())
+    }
+
+    pub(crate) fn write_with_manifest(&self, root: &Path, manifest: &str) -> Result<()> {
+        let content = Toml::try_from(self)?;
+        write_manifest_and_lock(root, manifest.as_bytes(), content.as_bytes())
     }
 
     fn validate(&self) -> Result<()> {

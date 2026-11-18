@@ -194,9 +194,10 @@ Tool entries use the same `artifacts.<platform>` shape under
 
 For a project with `[platforms]`, the lockfile also records the resolver
 inputs so that `install` and `exec` can detect a stale lock: a top-level
-`[platforms] targets` list and, per tool, its effective `targets` plus the
-manifest `asset-pattern` when one is set. Release tools then lock exactly one
-artifact per target; Binloom's own artifacts still cover all four platforms.
+`[platforms] targets` list and, per tool, its effective `targets` plus an
+`asset-pattern` snapshot of the manifest's `asset` when set. Release tools
+lock exactly one artifact per target. Binloom's own artifacts still cover
+all four platforms.
 
 ```toml
 [platforms]

@@ -195,6 +195,11 @@ fn ensure_platform_specific_assets(
         "use {os}, {arch} or {target} in the asset pattern so every platform locks its own asset";
     // OSes Binloom cannot target yet; naming one never matches any platform.
     const UNSUPPORTED_OS_ALIASES: [&str; 3] = ["windows", "win32", "win64"];
+    // Likewise for architectures: `armv7` must never be locked as an x86_64 asset.
+    const UNSUPPORTED_ARCH_ALIASES: [&str; 14] = [
+        "arm", "armv5", "armv6", "armv7", "armv7l", "armhf", "i386", "i686", "386", "ppc64",
+        "ppc64le", "s390x", "riscv64", "mips64",
+    ];
     // `v1.0.0` must go before `1.0.0`: the `v` would otherwise glue the bare
     // version to an alphanumeric and keep it visible.
     let tagged = if version.is_empty() {
@@ -220,7 +225,9 @@ fn ensure_platform_specific_assets(
             .any(|alias| contains_token(&platform_part, alias));
         let foreign_arch = Platform::ALL.iter().any(|other| {
             other.arch_aliases() != platform.arch_aliases() && other.arch_in(&platform_part)
-        });
+        }) || UNSUPPORTED_ARCH_ALIASES
+            .iter()
+            .any(|alias| contains_token(&platform_part, alias));
         // Name a whole platform only when both its OS and architecture appear
         // in the name, so a Linux asset is never blamed on macOS.
         let foreign = Platform::ALL.iter().find(|other| {
@@ -774,6 +781,20 @@ mod tests {
             format!("{error:#}").contains("names a different OS"),
             "{error:#}"
         );
+    }
+
+    #[test]
+    fn rejects_unsupported_architecture_asset_for_a_single_target() {
+        for (asset, targets) in [
+            ("tool-1.0.0-linux-armv7.tar.gz", [Platform::LinuxX86_64]),
+            ("tool-1.0.0-linux-i686.tar.gz", [Platform::LinuxAarch64]),
+        ] {
+            let error = resolve_targets(&[asset], Some(asset), &targets).unwrap_err();
+            assert!(
+                format!("{error:#}").contains("names a different architecture"),
+                "{error:#}"
+            );
+        }
     }
 
     #[test]

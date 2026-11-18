@@ -1,7 +1,7 @@
-use std::{collections::BTreeMap, path::Path};
+use std::path::Path;
 
 use crate::{
-    common::{LOCKFILE, MANIFEST, project_root, write_atomically},
+    common::{LOCKFILE, MANIFEST, project_root},
     domain::{
         lockfile::{LockedPlatforms, Lockfile},
         manifest::{self, Manifest, Tool},
@@ -15,17 +15,26 @@ use anyhow::{Context, Result, ensure};
 pub(crate) fn update(tool_name: Option<&str>) -> Result<()> {
     let root = project_root()?;
 
-    update_tools(&root, tool_name, true)
+    update_tools(&root, tool_name)
 }
 
 pub(crate) fn lock() -> Result<()> {
     let root = project_root()?;
 
-    update_tools(&root, None, false)
+    let lock_path = root.join(LOCKFILE);
+    let manifest = Manifest::try_from(root.join(MANIFEST).as_path())?;
+    let lockfile = resolve_project(&manifest, None, false, None)?;
+    lockfile.write_new(&lock_path)?;
+    println!("Updated {}", lock_path.display());
+
+    Ok(())
 }
 
-pub(crate) fn lock_added_tool(tool_name: &str) -> Result<()> {
-    let root = project_root()?;
+pub(crate) fn lock_added_tool(
+    root: &Path,
+    manifest: &Manifest,
+    tool_name: &str,
+) -> Result<Lockfile> {
     let lock_path = root.join(LOCKFILE);
 
     let existing = if lock_path
@@ -39,14 +48,48 @@ pub(crate) fn lock_added_tool(tool_name: &str) -> Result<()> {
 
     let target = lock_target(existing.as_ref(), tool_name);
 
-    update_tools(&root, target, false)
+    resolve_project(manifest, target, false, existing)
 }
 
-fn update_tools(root: &Path, tool_name: Option<&str>, latest: bool) -> Result<()> {
+fn update_tools(root: &Path, tool_name: Option<&str>) -> Result<()> {
     let manifest_path = root.join(MANIFEST);
     let lock_path = root.join(LOCKFILE);
     let manifest = Manifest::try_from(manifest_path.as_path())?;
+    let existing = tool_name
+        .map(|name| {
+            ensure!(
+                manifest.tools.contains_key(name),
+                "tool {name} is not configured"
+            );
+            Lockfile::try_from(lock_path.as_path())
+                .context("failed to load binloom.lock; run `binloom update` first")
+        })
+        .transpose()?;
+    let lockfile = resolve_project(&manifest, tool_name, true, existing)?;
 
+    let binloom_version = lockfile
+        .binloom
+        .as_ref()
+        .filter(|_| tool_name.is_none())
+        .map(|locked| locked.version.as_str());
+    let versions = lockfile
+        .tools
+        .iter()
+        .filter(|(name, _)| tool_name.is_none_or(|selected| selected == name.as_str()))
+        .map(|(name, locked)| (name.as_str(), locked.version.as_str()));
+    let updated_manifest = manifest::render_versions(&manifest_path, binloom_version, versions)?;
+    lockfile.write_with_manifest(root, &updated_manifest)?;
+    println!("Updated {}", lock_path.display());
+
+    Ok(())
+}
+
+fn resolve_project(
+    manifest: &Manifest,
+    tool_name: Option<&str>,
+    latest: bool,
+    existing: Option<Lockfile>,
+) -> Result<Lockfile> {
     let minimum_age = manifest.update.minimum_release_age_minutes;
 
     let (selected, mut lockfile): (Vec<(&str, &Tool)>, Lockfile) = match tool_name {
@@ -56,8 +99,7 @@ fn update_tools(root: &Path, tool_name: Option<&str>, latest: bool) -> Result<()
                 .get(name)
                 .with_context(|| format!("tool {name} is not configured"))?;
 
-            let lockfile = Lockfile::try_from(lock_path.as_path())
-                .context("failed to load binloom.lock; run `binloom update` first")?;
+            let lockfile = existing.context("missing binloom.lock; run `binloom update` first")?;
             ensure!(
                 manifest.project_targets()
                     == lockfile
@@ -81,7 +123,6 @@ fn update_tools(root: &Path, tool_name: Option<&str>, latest: bool) -> Result<()
     };
 
     let client = download::client();
-    let mut versions = BTreeMap::new();
 
     for (name, tool) in selected {
         let version = if latest {
@@ -98,11 +139,10 @@ fn update_tools(root: &Path, tool_name: Option<&str>, latest: bool) -> Result<()
             locked.asset_pattern.clone_from(&tool.asset);
         }
 
-        versions.insert(name.to_owned(), locked.version.clone());
         lockfile.tools.insert(name.to_owned(), locked);
     }
 
-    let binloom_version = if tool_name.is_none() {
+    if tool_name.is_none() {
         let source = binloom_source();
 
         let version = if latest {
@@ -114,42 +154,15 @@ fn update_tools(root: &Path, tool_name: Option<&str>, latest: bool) -> Result<()
         let minimum_age = binloom_minimum_age(version, minimum_age);
         let (locked, wrapper) = resolve_binloom(&source, version, minimum_age, &client)?;
 
-        let version = locked.version.clone();
-
         lockfile.binloom = Some(locked);
         lockfile.wrapper = Some(wrapper);
-
-        latest.then_some(version)
-    } else {
-        None
-    };
+    }
 
     lockfile.platforms = manifest.project_targets().map(|targets| LockedPlatforms {
         targets: targets.to_vec(),
     });
 
-    // Every resolution and manifest edit succeeds before any file is replaced.
-    let updated_manifest = latest
-        .then(|| {
-            manifest::render_versions(
-                manifest_path.as_path(),
-                binloom_version.as_deref(),
-                versions
-                    .iter()
-                    .map(|(name, version)| (name.as_str(), version.as_str())),
-            )
-        })
-        .transpose()?;
-
-    lockfile.write(lock_path.as_path())?;
-
-    if let Some(content) = updated_manifest {
-        write_atomically(manifest_path.as_path(), content.as_bytes())?;
-    }
-
-    println!("Updated {}", lock_path.display());
-
-    Ok(())
+    Ok(lockfile)
 }
 
 pub(crate) fn update_binloom() -> Result<()> {
@@ -182,9 +195,7 @@ pub(crate) fn update_binloom() -> Result<()> {
     lockfile.binloom = Some(locked);
     lockfile.wrapper = Some(wrapper);
     let updated_manifest = manifest::render_versions(manifest_path.as_path(), Some(&version), [])?;
-    lockfile.write(lock_path.as_path())?;
-
-    write_atomically(manifest_path.as_path(), updated_manifest.as_bytes())?;
+    lockfile.write_with_manifest(&root, &updated_manifest)?;
 
     println!("Updated Binloom in {}", lock_path.display());
 
@@ -264,7 +275,7 @@ mod tests {
         std::fs::write(directory.path().join(MANIFEST), manifest).unwrap();
         std::fs::write(directory.path().join(LOCKFILE), lock).unwrap();
 
-        let error = update_tools(directory.path(), Some("tool"), false).unwrap_err();
+        let error = update_tools(directory.path(), Some("tool")).unwrap_err();
 
         assert!(error.to_string().contains("[platforms] targets changed"));
         assert_eq!(

@@ -53,7 +53,7 @@ fn init_at(root: &Path, lock: impl FnOnce() -> Result<()>) -> Result<()> {
     Ok(())
 }
 
-fn generate_manifest(path: &Path) -> io::Result<()> {
+fn generate_manifest(path: &Path) -> Result<()> {
     let manifest = format!(
         r#"#:schema https://raw.githubusercontent.com/KyrboForge/binloom/main/schemas/binloom.schema.json
 
@@ -64,9 +64,7 @@ version = "{}"
 "#,
         env!("CARGO_PKG_VERSION")
     );
-    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
-
-    file.write_all(manifest.as_bytes())
+    common::write_new_atomically(path, manifest.as_bytes())
 }
 fn add_to_gitignore(path: &Path) -> io::Result<bool> {
     let existing = match fs::read_to_string(path) {
@@ -157,7 +155,10 @@ version = "{}"
 
         let error = generate_manifest(&path).unwrap_err();
 
-        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            error.downcast_ref::<io::Error>().unwrap().kind(),
+            io::ErrorKind::AlreadyExists
+        );
         assert_eq!(fs::read_to_string(path).unwrap(), expected);
     }
 
