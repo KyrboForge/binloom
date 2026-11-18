@@ -618,6 +618,43 @@ fn failed_reinstall_keeps_the_existing_install() {
 }
 
 #[test]
+fn oversized_gzip_cache_is_not_executed() {
+    let fx = Fixture::new();
+    let dir = fx.dir("1.0.0");
+    fs::create_dir_all(&dir).unwrap();
+    let executable = dir.join("binloom");
+    let mut file = fs::File::create(&executable).unwrap();
+    file.write_all(b"#!/bin/sh\necho ran:oversized\nexit 0\n")
+        .unwrap();
+    file.set_len(512 * 1024 * 1024 + 1).unwrap();
+    drop(file);
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let archive = Command::new("gzip")
+        .args(["-1", "-c"])
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(archive.status.success(), "{}", stderr(&archive));
+    let mut artifact = Artifact::new("oversized", "gz");
+    artifact.body = archive.stdout;
+    let artifact_sha = checksum(&artifact.body);
+    fx.lock_with_sha("1.0.0", &artifact, &artifact_sha);
+    fs::write(dir.join(".artifact"), &artifact.body).unwrap();
+    fs::write(dir.join(".artifact-sha256"), artifact_sha).unwrap();
+    // SHA-256 of the script above padded with zeros to 512 MiB + 1 byte.
+    fs::write(
+        dir.join(".executable-sha256"),
+        "52c737d091fe9e714669660c70d8f8a184d0f8738a5fe490c3bf839ae7b092f0",
+    )
+    .unwrap();
+
+    let (output, requests) = fx.run_offline();
+    assert_refused(&output, "oversized");
+    assert_eq!(requests, ["/binloom"]);
+}
+
+#[test]
 fn executable_modes_are_respected_or_repaired() {
     let fx = Fixture::new();
     let artifact = Artifact::new("good", "raw");
