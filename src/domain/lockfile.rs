@@ -1,5 +1,8 @@
 use crate::{
-    common::{validate_tool_name, validate_version, write_manifest_and_lock, write_new_atomically},
+    common::{
+        newer_binloom_hint, parse_versioned_toml, validate_tool_name, validate_version,
+        write_manifest_and_lock, write_new_atomically,
+    },
     domain::{
         platform::{Platform, canonical_targets},
         sources::Source,
@@ -8,8 +11,9 @@ use crate::{
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
 use std::path::Path;
+use std::{fs, io, ops::Range};
+use toml_edit::{Document, Table};
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -173,12 +177,19 @@ impl TryFrom<&Path> for Lockfile {
     fn try_from(path: &Path) -> Result<Self> {
         let content = fs::read_to_string(path)
             .with_context(|| format!("failed to read {}", path.display()))?;
+        Self::parse(&content, path)
+    }
+}
 
-        let mut lockfile: Self = toml::from_str(&content)
-            .with_context(|| format!("failed to parse {}", path.display()))?;
+impl Lockfile {
+    fn parse(content: &str, path: &Path) -> Result<Self> {
+        let mut lockfile: Self = parse_versioned_toml(content, path, "lock-version")?;
 
         if lockfile.version != 1 {
-            bail!("unsupported lockfile version: {}", lockfile.version);
+            return Err(
+                anyhow::anyhow!("unsupported lockfile version: {}", lockfile.version)
+                    .context(newer_binloom_hint(path)),
+            );
         }
 
         lockfile.validate()?;
@@ -193,9 +204,6 @@ impl TryFrom<&Path> for Lockfile {
         }
         Ok(lockfile)
     }
-}
-
-impl Lockfile {
     #[cfg(test)]
     pub(crate) fn write(&self, path: &Path) -> Result<()> {
         let content = Toml::try_from(self)?;
@@ -211,6 +219,41 @@ impl Lockfile {
     pub(crate) fn write_with_manifest(&self, root: &Path, manifest: &str) -> Result<()> {
         let content = Toml::try_from(self)?;
         write_manifest_and_lock(root, manifest.as_bytes(), content.as_bytes())
+    }
+
+    pub(crate) fn write_bootstrap_with_manifest(
+        root: &Path,
+        manifest: &str,
+        binloom: LockedTool,
+        wrapper: LockedWrapper,
+    ) -> Result<()> {
+        let path = root.join(crate::common::LOCKFILE);
+        let existing = match fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Self {
+                    binloom: Some(binloom),
+                    wrapper: Some(wrapper),
+                    ..Self::default()
+                }
+                .write_with_manifest(root, manifest);
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to read {}", path.display()));
+            }
+        };
+        Self::parse(&existing, &path)?;
+
+        #[derive(Serialize)]
+        struct Bootstrap {
+            binloom: LockedTool,
+            wrapper: LockedWrapper,
+        }
+        let bootstrap = toml::to_string_pretty(&Bootstrap { binloom, wrapper })
+            .context("failed to serialize Binloom bootstrap lock entries")?;
+        let updated = replace_bootstrap_sections(&existing, &bootstrap)?;
+        Self::parse(&updated, &path)?;
+        write_manifest_and_lock(root, manifest.as_bytes(), updated.as_bytes())
     }
 
     fn validate(&self) -> Result<()> {
@@ -249,6 +292,60 @@ impl Lockfile {
         }
 
         Ok(())
+    }
+}
+
+fn replace_bootstrap_sections(content: &str, bootstrap: &str) -> Result<String> {
+    let document = Document::parse(content).context("failed to edit binloom.lock")?;
+    let mut spans = Vec::new();
+    collect_bootstrap_spans(document.as_table(), true, &mut spans);
+    spans.sort_by_key(|span| span.start);
+
+    // Copy untouched bytes instead of re-rendering their TOML tables.
+    let mut updated = String::new();
+    let mut previous_end = 0;
+    for span in spans {
+        let start = content[..span.start]
+            .rfind('\n')
+            .map_or(0, |index| index + 1);
+        let gap = &content[previous_end..start];
+        if previous_end == 0 || !gap.trim().is_empty() {
+            updated.push_str(gap);
+        }
+        previous_end = content[span.end..]
+            .find('\n')
+            .map_or(content.len(), |index| span.end + index + 1);
+    }
+    updated.push_str(&content[previous_end..]);
+    if !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    updated.push_str(bootstrap);
+    Ok(updated)
+}
+
+fn collect_bootstrap_spans(table: &Table, root: bool, spans: &mut Vec<Range<usize>>) {
+    if !root && !table.is_implicit() {
+        spans.extend(table.span());
+    }
+    if !table.is_dotted() {
+        for (keys, value) in table.get_values() {
+            if !root || matches!(keys[0].get(), "binloom" | "wrapper") {
+                let key = keys
+                    .last()
+                    .and_then(|key| key.span())
+                    .expect("parsed key has a span");
+                let value = value.span().expect("parsed value has a span");
+                spans.push(key.start..value.end);
+            }
+        }
+    }
+    for (key, item) in table.iter() {
+        if (!root || matches!(key, "binloom" | "wrapper"))
+            && let Some(child) = item.as_table()
+        {
+            collect_bootstrap_spans(child, false, spans);
+        }
     }
 }
 
@@ -362,6 +459,54 @@ impl LockedTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replaces_only_bootstrap_lines_in_mixed_toml_layouts() {
+        let original = concat!(
+            "# lock\r\n",
+            "binloom.version = '1.0.0'\r\n",
+            "lock-version = 1\r\n",
+            "binloom.source = 'github:KyrboForge/binloom'\r\n",
+            "wrapper = { version = '1.0.0', url = 'https://example.invalid/old' }\r\n",
+            "[ binloom . artifacts . 'linux-x86_64' ]\r\n",
+            "format = 'raw'\r\n",
+            "# Preserve everything belonging to the tool.\r\n",
+            "[tools.demo]\r\n",
+            "version = '2.0.0' # pin",
+        );
+        let bootstrap = "[binloom]\nversion = '1.1.0'\n\n[wrapper]\nversion = '1.1.0'\n";
+        let expected = format!(
+            "# lock\r\nlock-version = 1\r\n# Preserve everything belonging to the tool.\r\n[tools.demo]\r\nversion = '2.0.0' # pin\n{bootstrap}"
+        );
+        let updated = replace_bootstrap_sections(original, bootstrap).unwrap();
+        assert_eq!(updated, expected);
+        assert_eq!(
+            replace_bootstrap_sections(&updated, bootstrap).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn future_lock_schema_errors_suggest_upgrading_binloom() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("binloom.lock");
+        let unknown_variant = format!(
+            "lock-version = 1\n[wrapper]\nversion = '1.0.0'\nurl = 'https://example.invalid/binloomw'\nsha256 = '{}'\nchecksum-source = 'future-checksum'\n",
+            "a".repeat(64)
+        );
+        for (content, cause) in [
+            ("lock-version = 1\nfuture-field = true\n", "unknown field"),
+            (unknown_variant.as_str(), "unknown variant"),
+            ("lock-version = 2\n", "unsupported lockfile version: 2"),
+        ] {
+            fs::write(&path, content).unwrap();
+            let error = format!("{:#}", Lockfile::try_from(path.as_path()).unwrap_err());
+            assert!(error.contains(cause), "{error}");
+            assert!(error.contains("binloom.lock"), "{error}");
+            assert!(error.contains(env!("CARGO_PKG_VERSION")), "{error}");
+            assert!(error.contains("./binloomw update --self"), "{error}");
+        }
+    }
 
     #[test]
     fn serializes_and_persists_lockfile() {
@@ -726,7 +871,15 @@ checksum-source = "digest"
         );
 
         lockfile.write(&path).unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), EXPLICIT_LOCK);
+        let first = fs::read_to_string(&path).unwrap();
+        assert_eq!(first, EXPLICIT_LOCK);
+        for _ in 0..2 {
+            Lockfile::try_from(path.as_path())
+                .unwrap()
+                .write(&path)
+                .unwrap();
+            assert_eq!(fs::read_to_string(&path).unwrap(), first);
+        }
     }
 
     #[test]

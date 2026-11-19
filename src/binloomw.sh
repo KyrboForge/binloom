@@ -7,16 +7,22 @@ BINLOOMW_VERSION="@BINLOOM_VERSION@"
 ROOT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
 LOCKFILE="$ROOT_DIR/binloom.lock"
 
+fail() {
+    echo "error: $*" >&2
+    exit 1
+}
+
 if [ ! -f "$LOCKFILE" ]; then
-    echo "error: binloom.lock not found" >&2
+    echo "error: binloom.lock not found. Run 'binloom update' to generate the lock, or 'binloom init' to set up the project." >&2
     exit 1
 fi
 
+SUPPORTED_HOSTS="Supported hosts: macos or linux on aarch64 or x86_64."
 case "$(uname -s)" in
     Darwin) OS="macos" ;;
     Linux) OS="linux" ;;
     *)
-        echo "error: unsupported operating system: $(uname -s)" >&2
+        echo "error: unsupported operating system: $(uname -s). $SUPPORTED_HOSTS" >&2
         exit 1
         ;;
 esac
@@ -25,7 +31,7 @@ case "$(uname -m)" in
     arm64 | aarch64) ARCH="aarch64" ;;
     x86_64 | amd64) ARCH="x86_64" ;;
     *)
-        echo "error: unsupported architecture: $(uname -m)" >&2
+        echo "error: unsupported architecture: $(uname -m). $SUPPORTED_HOSTS" >&2
         exit 1
         ;;
 esac
@@ -106,6 +112,40 @@ verify_file() {
     fi
 }
 
+validate_version() {
+    case "$1" in
+        "" | "." | ".." | .* | */* | *\\* | [[:space:]]* | *[[:space:]])
+            return 1
+            ;;
+    esac
+}
+
+has_lock_section() {
+    awk -v section="[$1]" '$0 == section { found = 1; exit } END { exit !found }' "$LOCKFILE"
+}
+
+VERSION=$(read_lock_value "binloom" "version")
+if [ -z "$VERSION" ] && ! has_lock_section "binloom"; then
+    fail "missing [binloom] in binloom.lock. Run 'binloom update' to regenerate the lock, or 'binloom init' to set up the project."
+fi
+
+ARTIFACT_SECTION="binloom.artifacts.$PLATFORM"
+URL=$(read_lock_value "$ARTIFACT_SECTION" "url")
+SHA256=$(read_lock_value "$ARTIFACT_SECTION" "sha256")
+FORMAT=$(read_lock_value "$ARTIFACT_SECTION" "format")
+if [ -z "$URL$SHA256$FORMAT" ] && ! has_lock_section "$ARTIFACT_SECTION"; then
+    fail "missing [$ARTIFACT_SECTION] in binloom.lock. The wrapper selects Binloom's own artifact by OS+arch only (no libc detection or fallback). Re-lock with 'binloom update --self' using a Binloom release that publishes this artifact, or use a supported host with a locked artifact."
+fi
+
+if [ -z "$VERSION" ] || [ -z "$URL" ] || [ -z "$SHA256" ] || [ -z "$FORMAT" ]; then
+    echo "error: incomplete Binloom lock data for $PLATFORM" >&2
+    exit 1
+fi
+if ! validate_version "$VERSION"; then
+    echo "error: unsafe Binloom version in lockfile: $VERSION" >&2
+    exit 1
+fi
+
 LOCKED_WRAPPER_VERSION=$(read_lock_value "wrapper" "version")
 WRAPPER_URL=$(read_lock_value "wrapper" "url")
 WRAPPER_SHA256=$(read_lock_value "wrapper" "sha256")
@@ -123,6 +163,9 @@ if [ -n "${LOCKED_WRAPPER_VERSION}${WRAPPER_URL}${WRAPPER_SHA256}" ]; then
 
     if [ "$BINLOOMW_VERSION" != "$LOCKED_WRAPPER_VERSION" ] ||
         [ "$CURRENT_WRAPPER_SHA256" != "$WRAPPER_SHA256" ]; then
+        if [ "${BINLOOMW_REEXEC:-}" = 1 ]; then
+            fail "Binloom wrapper still differs from its pin after replacement; refusing to replace it again"
+        fi
         WRAPPER_TMP=$(mktemp "$ROOT_DIR/.binloomw.XXXXXX")
 
         cleanup_wrapper() {
@@ -134,37 +177,23 @@ if [ -n "${LOCKED_WRAPPER_VERSION}${WRAPPER_URL}${WRAPPER_SHA256}" ]; then
         download_file "$WRAPPER_URL" "$WRAPPER_TMP"
         verify_file "$WRAPPER_TMP" "$WRAPPER_SHA256" "Binloom wrapper"
 
+        DOWNLOADED_WRAPPER_VERSION=$(awk -F '"' '/^BINLOOMW_VERSION="[^"]+"$/ { print $2 }' "$WRAPPER_TMP")
+        if [ "$DOWNLOADED_WRAPPER_VERSION" != "$LOCKED_WRAPPER_VERSION" ]; then
+            fail "downloaded Binloom wrapper embeds version ${DOWNLOADED_WRAPPER_VERSION:-<missing or invalid>}; lock requires $LOCKED_WRAPPER_VERSION"
+        fi
         chmod 755 "$WRAPPER_TMP"
         mv "$WRAPPER_TMP" "$WRAPPER_PATH"
 
         trap - EXIT HUP INT TERM
 
+        # The replacement inherits the guard for this re-exec only.
+        export BINLOOMW_REEXEC=1
         exec "$WRAPPER_PATH" "$@"
     fi
 fi
 
-validate_version() {
-    case "$1" in
-        "" | "." | ".." | .* | */* | *\\* | [[:space:]]* | *[[:space:]])
-            return 1
-            ;;
-    esac
-}
+unset BINLOOMW_REEXEC
 
-VERSION=$(read_lock_value "binloom" "version")
-ARTIFACT_SECTION="binloom.artifacts.$PLATFORM"
-URL=$(read_lock_value "$ARTIFACT_SECTION" "url")
-SHA256=$(read_lock_value "$ARTIFACT_SECTION" "sha256")
-FORMAT=$(read_lock_value "$ARTIFACT_SECTION" "format")
-
-if [ -z "$VERSION" ] || [ -z "$URL" ] || [ -z "$SHA256" ] || [ -z "$FORMAT" ]; then
-    echo "error: incomplete Binloom lock data for $PLATFORM" >&2
-    exit 1
-fi
-if ! validate_version "$VERSION"; then
-    echo "error: unsafe Binloom version in lockfile: $VERSION" >&2
-    exit 1
-fi
 TOOLS_DIR="$ROOT_DIR/.tools"
 BINLOOM_DIR="$TOOLS_DIR/binloom"
 INSTALL_DIR="$BINLOOM_DIR/$VERSION"
@@ -190,11 +219,6 @@ MAX_DECOMPRESSED_BYTES=536870912
 # exec (also two wrappers whose locks name different artifacts for one version);
 # closing that needs supervision or digest-addressed paths, which this layout
 # does not have.
-
-fail() {
-    echo "error: $*" >&2
-    exit 1
-}
 
 # Mirrors the Rust verifier: an executable or cache directory owned by someone
 # else (root excepted) or writable by group/others is replaced or refused instead

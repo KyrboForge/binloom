@@ -1,102 +1,36 @@
 #![cfg(unix)]
 
-use sha2::{Digest, Sha256};
+mod common;
+
+use common::{
+    Artifact, TestServer, artifact_section, assert_ran, assert_refused, binloom_lock, checksum,
+    gzip, isolated_path, leftover_temp_files, script, stderr, stdout, wrapper_command,
+    wrapper_source, write_executable,
+};
 use std::{
     fs,
-    io::{BufRead, BufReader, Write},
-    net::{SocketAddr, TcpListener, TcpStream},
     os::unix::fs::{PermissionsExt, symlink},
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
-    thread,
-    time::Duration,
 };
 
 const TOOL: &str = "wrapper-test-tool";
 const OTHER_TOOL: &str = "other-tool";
 const TOOL_SCRIPT: &[u8] = b"#!/bin/sh\nprintf '<%s>\\n' \"$@\"\nexit 42\n";
 
-fn checksum(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
-fn serve(listener: &TcpListener, artifacts: &[(&str, &[u8])]) -> Vec<String> {
-    let mut requests = Vec::new();
-    for stream in listener.incoming() {
-        let mut stream = stream.unwrap();
-        let timeout = Some(Duration::from_secs(10));
-        stream.set_read_timeout(timeout).unwrap();
-        stream.set_write_timeout(timeout).unwrap();
-
-        let mut reader = BufReader::new(&stream);
-        let mut line = String::new();
-        if reader.read_line(&mut line).unwrap() == 0 {
-            // The test closes an empty connection to stop the server.
-            break;
-        }
-        let mut request = line.split_ascii_whitespace();
-        assert_eq!(request.next(), Some("GET"));
-        let path = request.next().unwrap().to_owned();
-        loop {
-            line.clear();
-            assert!(reader.read_line(&mut line).unwrap() > 0);
-            if line == "\r\n" {
-                break;
-            }
-        }
-
-        if let Some((_, body)) = artifacts.iter().find(|(route, _)| *route == path) {
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
-            )
-            .unwrap();
-            stream.write_all(body).unwrap();
-        } else {
-            stream
-                .write_all(
-                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                )
-                .unwrap();
-        }
-        requests.push(path);
-    }
-    requests
-}
-
 #[test]
 fn wrapper_bootstraps_binloom_and_installs_only_the_executed_tool() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("fixture project");
-    let path = temp.path().join("bin");
     fs::create_dir(&root).unwrap();
-    fs::create_dir(&path).unwrap();
-    for utility in UTILITIES {
-        if let Some(executable) = ["/usr/bin", "/bin"]
-            .map(|dir| Path::new(dir).join(utility))
-            .into_iter()
-            .find(|file| file.is_file())
-        {
-            symlink(executable, path.join(utility)).unwrap();
-        }
-    }
+    isolated_path(temp.path());
 
     let version = env!("CARGO_PKG_VERSION");
     let binloom = fs::read(env!("CARGO_BIN_EXE_binloom")).unwrap();
-    let wrapper = root.join("binloomw");
-    fs::write(
-        &wrapper,
-        include_str!("../src/binloomw.sh").replace("@BINLOOM_VERSION@", version),
-    )
-    .unwrap();
-    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&root.join("binloomw"), wrapper_source(version));
 
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let address = listener.local_addr().unwrap();
+    let server = TestServer::new();
+    let address = server.address();
     let platform = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
     let binloom_sha = checksum(&binloom);
     let tool_sha = checksum(TOOL_SCRIPT);
@@ -136,23 +70,17 @@ format = "raw"
     let tool_route = format!("/{TOOL}");
     let other_route = format!("/{OTHER_TOOL}");
     let artifacts = [
-        ("/binloom", binloom.as_slice()),
-        (tool_route.as_str(), TOOL_SCRIPT),
-        (other_route.as_str(), TOOL_SCRIPT),
+        ("/binloom", binloom.as_slice().into()),
+        (tool_route.as_str(), TOOL_SCRIPT.into()),
+        (other_route.as_str(), TOOL_SCRIPT.into()),
     ];
-    let (output, requests) = thread::scope(|scope| {
-        let server = scope.spawn(|| serve(&listener, &artifacts));
-        let output = Command::new(&wrapper)
-            .current_dir(&root)
-            .env_clear()
-            .env("PATH", &path)
-            .env("HOME", temp.path())
+    let (output, requests) = server.serving(&artifacts, || {
+        wrapper_command(&root, temp.path(), None)
             .env("XDG_CACHE_HOME", temp.path().join("cache"))
             .env("XDG_CONFIG_HOME", temp.path().join("config"))
             .args(["exec", TOOL, "two words", "--flag", "", "*?[a]"])
-            .output();
-        drop(TcpStream::connect(address).unwrap());
-        (output.unwrap(), server.join().unwrap())
+            .output()
+            .unwrap()
     });
 
     assert_eq!(
@@ -179,64 +107,6 @@ format = "raw"
     assert!(!root.join(".tools").join(OTHER_TOOL).exists());
 }
 
-const UTILITIES: [&str; 20] = [
-    "awk",
-    "cat",
-    "chmod",
-    "cp",
-    "curl",
-    "dirname",
-    "find",
-    "gzip",
-    "head",
-    "id",
-    "mkdir",
-    "mktemp",
-    "mv",
-    "rm",
-    "sha256sum",
-    "shasum",
-    "sync",
-    "uname",
-    "wc",
-    "wget",
-];
-
-fn script(tag: &str) -> Vec<u8> {
-    format!("#!/bin/sh\necho ran:{tag}\n").into_bytes()
-}
-
-fn gzip(bytes: &[u8]) -> Vec<u8> {
-    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
-    encoder.write_all(bytes).unwrap();
-    encoder.finish().unwrap()
-}
-
-/// An artifact as served for a locked Binloom version: the bytes on the wire and the program they unpack to.
-struct Artifact {
-    tag: String,
-    body: Vec<u8>,
-    program: Vec<u8>,
-    format: &'static str,
-}
-
-impl Artifact {
-    fn new(tag: &str, format: &'static str) -> Self {
-        let program = script(tag);
-        let body = if format == "gz" {
-            gzip(&program)
-        } else {
-            program.clone()
-        };
-        Self {
-            tag: tag.to_owned(),
-            body,
-            program,
-            format,
-        }
-    }
-}
-
 impl Artifact {
     /// A gz artifact made of two concatenated members, as `gzip -dc` and `cat a.gz b.gz` produce.
     fn multi_member(tag: &str) -> Self {
@@ -258,41 +128,23 @@ const FORMATS: [&str; 2] = ["raw", "gz"];
 struct Fixture {
     temp: tempfile::TempDir,
     root: PathBuf,
-    listener: TcpListener,
-    address: SocketAddr,
+    server: TestServer,
 }
 
 impl Fixture {
     fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("project");
-        let path = temp.path().join("bin");
         fs::create_dir(&root).unwrap();
-        fs::create_dir(&path).unwrap();
-        for utility in UTILITIES {
-            if let Some(executable) = ["/usr/bin", "/bin"]
-                .map(|dir| Path::new(dir).join(utility))
-                .into_iter()
-                .find(|file| file.is_file())
-            {
-                symlink(executable, path.join(utility)).unwrap();
-            }
-        }
-        let wrapper = root.join("binloomw");
-        fs::write(
-            &wrapper,
-            include_str!("../src/binloomw.sh")
-                .replace("@BINLOOM_VERSION@", env!("CARGO_PKG_VERSION")),
-        )
-        .unwrap();
-        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
+        isolated_path(temp.path());
+        write_executable(
+            &root.join("binloomw"),
+            wrapper_source(env!("CARGO_PKG_VERSION")),
+        );
         Self {
             temp,
             root,
-            listener,
-            address,
+            server: TestServer::new(),
         }
     }
 
@@ -302,17 +154,14 @@ impl Fixture {
 
     fn lock_with_sha(&self, version: &str, artifact: &Artifact, sha: &str) {
         let platform = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
-        let format = artifact.format;
-        fs::write(
-            self.root.join("binloom.lock"),
-            format!(
-                "lock-version = 1\n[binloom]\nversion = \"{version}\"\n\
-                 [binloom.artifacts.{platform}]\nurl = \"http://{}/binloom\"\n\
-                 sha256 = \"{sha}\"\nformat = \"{format}\"\n",
-                self.address
-            ),
-        )
-        .unwrap();
+        let mut lock = binloom_lock(version);
+        lock.push_str(&artifact_section(
+            &format!("binloom.artifacts.{platform}"),
+            &format!("http://{}/binloom", self.server.address()),
+            sha,
+            artifact.format,
+        ));
+        fs::write(self.root.join("binloom.lock"), lock).unwrap();
     }
 
     fn dir(&self, version: &str) -> PathBuf {
@@ -320,28 +169,16 @@ impl Fixture {
     }
 
     fn command(&self) -> Command {
-        let mut command = Command::new(self.root.join("binloomw"));
-        command
-            .current_dir(&self.root)
-            .env_clear()
-            .env("PATH", self.temp.path().join("bin"))
-            .env("HOME", self.temp.path());
-        command
+        wrapper_command(&self.root, self.temp.path(), None)
     }
 
-    /// Runs `f` while the fixture server serves `body` (nothing when empty) at `/binloom`; returns the paths requested.
+    /// A missing body makes the server return 404 for the Binloom route.
     fn serving<R>(&self, body: &[u8], f: impl FnOnce() -> R) -> (R, Vec<String>) {
-        let routes: Vec<(&str, &[u8])> = if body.is_empty() {
-            Vec::new()
+        if body.is_empty() {
+            self.server.serving(&[], f)
         } else {
-            vec![("/binloom", body)]
-        };
-        thread::scope(|scope| {
-            let server = scope.spawn(|| serve(&self.listener, &routes));
-            let result = f();
-            drop(TcpStream::connect(self.address).unwrap());
-            (result, server.join().unwrap())
-        })
+            self.server.serving(&[("/binloom", body.into())], f)
+        }
     }
 
     fn run(&self, body: &[u8]) -> (Output, Vec<String>) {
@@ -359,32 +196,6 @@ impl Fixture {
         assert_ran(&output, &artifact.tag);
         assert_eq!(requests, ["/binloom"]);
     }
-}
-
-fn stdout(output: &Output) -> String {
-    String::from_utf8_lossy(&output.stdout).into_owned()
-}
-
-fn stderr(output: &Output) -> String {
-    String::from_utf8_lossy(&output.stderr).into_owned()
-}
-
-fn assert_ran(output: &Output, tag: &str) {
-    assert!(output.status.success(), "{}", stderr(output));
-    assert_eq!(stdout(output), format!("ran:{tag}\n"));
-}
-
-fn assert_refused(output: &Output, tag: &str) {
-    assert_eq!(output.status.code(), Some(1), "{}", stderr(output));
-    assert!(!stdout(output).contains(tag), "{}", stdout(output));
-}
-
-fn leftover_temp_files(dir: &Path) -> Vec<String> {
-    fs::read_dir(dir)
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-        .filter(|name| name.starts_with(".binloomw-tmp."))
-        .collect()
 }
 
 /// Replaces the cached executable with an attacker script, keeping or rewriting stamps.

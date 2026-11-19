@@ -16,6 +16,7 @@ struct ReleaseRequest<'a> {
     name: &'a str,
     source: &'a Source,
     asset_pattern: Option<&'a str>,
+    require_valid_sidecar: bool,
     targets: &'a [Platform],
 }
 
@@ -64,6 +65,7 @@ pub(crate) fn resolve_tool(
 
     resolve_release(
         ReleaseRequest {
+            require_valid_sidecar: false,
             name,
             source: &tool.source,
             asset_pattern: tool.asset.as_deref(),
@@ -97,12 +99,15 @@ fn resolve_checksum(
     release: &release::Release,
     asset: &release::ReleaseAsset,
     checksum_cache: &mut BTreeMap<String, String>,
+    require_valid_sidecar: bool,
 ) -> anyhow::Result<(String, ChecksumSource)> {
     if let Some(checksum) = &asset.sha256 {
         return Ok((checksum.clone(), ChecksumSource::Digest));
     }
 
-    if let Some(checksum) = release.checksum_from_sidecar(client, asset, checksum_cache)? {
+    if let Some(checksum) =
+        release.checksum_from_sidecar(client, asset, checksum_cache, require_valid_sidecar)?
+    {
         return Ok((checksum, ChecksumSource::Sidecar));
     }
 
@@ -155,7 +160,13 @@ fn resolve_release(
     ensure_platform_specific_assets(request.name, &version, &selected)?;
 
     for (platform, asset) in selected {
-        let (sha256, checksum_source) = resolve_checksum(client, release, asset, checksum_cache)?;
+        let (sha256, checksum_source) = resolve_checksum(
+            client,
+            release,
+            asset,
+            checksum_cache,
+            request.require_valid_sidecar,
+        )?;
         artifacts.insert(
             platform.to_string(),
             LockedArtifact {
@@ -272,7 +283,7 @@ fn ensure_minimum_release_age(
     ensure_minimum_age(&subject, published_at, minimum_minutes, now)
 }
 
-fn resolve_binloom_release(
+pub(crate) fn resolve_binloom_release(
     source: &Source,
     release: &release::Release,
     minimum_age_minutes: u64,
@@ -281,6 +292,7 @@ fn resolve_binloom_release(
     let mut checksum_cache = BTreeMap::new();
     let binloom = resolve_release(
         ReleaseRequest {
+            require_valid_sidecar: true,
             name: "binloom",
             source,
             asset_pattern: None,
@@ -300,7 +312,8 @@ fn resolve_binloom_release(
         }
     }
     let asset = release.find_asset_by_name("binloomw")?;
-    let (sha256, checksum_source) = resolve_checksum(client, release, asset, &mut checksum_cache)?;
+    let (sha256, checksum_source) =
+        resolve_checksum(client, release, asset, &mut checksum_cache, true)?;
 
     let wrapper = LockedWrapper {
         version: binloom.version.clone(),
@@ -356,6 +369,7 @@ mod tests {
         for _ in 0..2 {
             let locked = resolve_release(
                 ReleaseRequest {
+                    require_valid_sidecar: false,
                     name: "tool",
                     source: &source,
                     asset_pattern: None,
@@ -406,6 +420,7 @@ mod tests {
         let resolve = |pattern, targets| {
             resolve_release(
                 ReleaseRequest {
+                    require_valid_sidecar: false,
                     name: "tool",
                     source: &source,
                     asset_pattern: Some(pattern),
@@ -607,6 +622,7 @@ mod tests {
 
             resolve_release(
                 ReleaseRequest {
+                    require_valid_sidecar: false,
                     name: "binloom",
                     source: &source,
                     asset_pattern: None,
@@ -662,6 +678,7 @@ mod tests {
     fn resolve_gitleaks(pattern: Option<&str>) -> anyhow::Result<LockedTool> {
         resolve_release(
             ReleaseRequest {
+                require_valid_sidecar: false,
                 name: "gitleaks",
                 source: &Source::try_from("github:gitleaks/gitleaks".to_owned()).unwrap(),
                 asset_pattern: pattern,
@@ -855,6 +872,7 @@ mod tests {
         };
         resolve_release(
             ReleaseRequest {
+                require_valid_sidecar: false,
                 name: "tool",
                 source: &Source::try_from("github:owner/tool".to_owned()).unwrap(),
                 asset_pattern: pattern,
@@ -961,8 +979,14 @@ mod tests {
         let client = download::client();
         let mut checksum_cache = BTreeMap::new();
 
-        let resolved =
-            resolve_checksum(&client, &release, &release.assets[0], &mut checksum_cache).unwrap();
+        let resolved = resolve_checksum(
+            &client,
+            &release,
+            &release.assets[0],
+            &mut checksum_cache,
+            false,
+        )
+        .unwrap();
 
         assert_eq!(resolved, (checksum, ChecksumSource::Digest));
     }
@@ -994,8 +1018,14 @@ mod tests {
         };
         let client = download::client();
 
-        let resolved =
-            resolve_checksum(&client, &release, &release.assets[0], &mut checksum_cache).unwrap();
+        let resolved = resolve_checksum(
+            &client,
+            &release,
+            &release.assets[0],
+            &mut checksum_cache,
+            false,
+        )
+        .unwrap();
 
         assert_eq!(resolved, (checksum, ChecksumSource::Sidecar));
         assert_eq!(server.requests()[0].path, "/tool.gz.sha256");
@@ -1021,8 +1051,14 @@ mod tests {
         };
         let client = download::client();
 
-        let resolved =
-            resolve_checksum(&client, &release, &release.assets[0], &mut checksum_cache).unwrap();
+        let resolved = resolve_checksum(
+            &client,
+            &release,
+            &release.assets[0],
+            &mut checksum_cache,
+            false,
+        )
+        .unwrap();
 
         assert_eq!(
             resolved,
@@ -1067,14 +1103,14 @@ mod tests {
 
         assert_eq!(
             release
-                .checksum_from_sidecar(&client, &release.assets[0], &mut checksum_cache)
+                .checksum_from_sidecar(&client, &release.assets[0], &mut checksum_cache, false)
                 .unwrap(),
             Some(first_checksum)
         );
 
         assert_eq!(
             release
-                .checksum_from_sidecar(&client, &release.assets[1], &mut checksum_cache)
+                .checksum_from_sidecar(&client, &release.assets[1], &mut checksum_cache, false)
                 .unwrap(),
             Some(second_checksum)
         );

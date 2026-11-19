@@ -321,10 +321,12 @@ format = "raw"
         let directory = tempfile::tempdir().unwrap();
         let wrapper = directory.path().join("custom-wrapper");
         let updated_wrapper = directory.path().join("updated-binloomw");
+        let platform = Host::current_target(&Platform::LEGACY_DEFAULT).unwrap();
 
         generate_binloomw(&wrapper).unwrap();
 
         let updated_content = br#"#!/bin/sh
+BINLOOMW_VERSION="next"
 printf 'updated wrapper: %s\n' "$*"
 "#;
 
@@ -336,6 +338,14 @@ printf 'updated wrapper: %s\n' "$*"
             directory.path().join("binloom.lock"),
             format!(
                 r#"lock-version = 1
+
+[binloom]
+version = "next"
+
+[binloom.artifacts.{platform}]
+url = "file:///does-not-matter"
+sha256 = "{checksum}"
+format = "raw"
 
 [wrapper]
 version = "next"
@@ -349,7 +359,11 @@ sha256 = "{checksum}"
 
         let output = run_wrapper(Command::new(&wrapper).args(["hello", "world"]));
 
-        assert!(output.status.success());
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         assert_eq!(
             String::from_utf8(output.stdout).unwrap(),
             "updated wrapper: hello world\n"
@@ -398,18 +412,29 @@ format = "raw"
     fn wrapper_rejects_escaped_lock_values() {
         let directory = tempfile::tempdir().unwrap();
         let wrapper = directory.path().join("binloomw");
+        let platform = Host::current_target(&Platform::LEGACY_DEFAULT).unwrap();
 
         generate_binloomw(&wrapper).unwrap();
 
         fs::write(
             directory.path().join("binloom.lock"),
-            r#"lock-version = 1
+            format!(
+                r#"lock-version = 1
+
+[binloom]
+version = "test"
+
+[binloom.artifacts.{platform}]
+url = "file:///does-not-matter"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+format = "raw"
 
 [wrapper]
 version = "test"
 url = "https://example.com/a\\b"
 sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
-"#,
+"#
+            ),
         )
         .unwrap();
 

@@ -29,9 +29,9 @@ integration are outside the MVP.
 
 The committed `binloomw` script is the only project-supplied prerequisite. It:
 
-1. Detects the current platform.
+1. Detects the host OS and CPU architecture with `uname`.
 2. Reads the locked Binloom artifact from `binloom.lock`.
-3. Downloads it when the version is not cached.
+3. Downloads it when the cached install is missing or fails verification.
 4. Verifies its SHA-256 checksum.
 5. Decompresses and atomically installs it under
    `.tools/binloom/<version>/binloom`.
@@ -45,13 +45,67 @@ code.
 When the lockfile contains `[wrapper]`, the script verifies its own generated
 version and SHA-256 checksum. If it is outdated or changed, it downloads the
 locked `binloomw` release asset, verifies it, replaces itself atomically, and
-restarts. Older lockfiles without this optional section remain usable.
+restarts. It attempts at most one replacement per invocation. Older lockfiles
+without this optional section remain usable.
+
+Binloom locks its own releases under four legacy keys, independently of
+`[platforms]` and per-tool `targets`:
+
+- `binloom.artifacts.linux-x86_64`
+- `binloom.artifacts.linux-aarch64`
+- `binloom.artifacts.macos-x86_64`
+- `binloom.artifacts.macos-aarch64`
+
+Release Linux Binloom builds are static musl, so the same `linux-<arch>`
+artifact works on GNU and musl hosts. Legacy Linux keys retain their
+OS-and-architecture meaning and are never silently rewritten to explicit ABI
+keys. The wrapper performs no libc detection and has no GNU-to-musl or
+musl-to-GNU fallback. It never runs unverified bytes or a system Binloom.
+The Rust engine resolves managed tool targets, including explicit GNU, musl
+and macOS targets, from the separate `[tools.*]` lock entries.
 
 `binloom init` creates missing `binloom.toml`, `binloom.lock` and `binloomw`
 files, makes the wrapper executable, and adds `.tools/` to `.gitignore`.
 Existing project files are preserved; an existing `binloom.toml` must be valid.
 The lock is resolved before the wrapper is written, so the wrapper can run
 immediately.
+
+### Bootstrap diagnostics
+
+The wrapper reports these errors. Angle brackets stand for values from the
+host or lock. If a replacement fails verification or still differs from the
+pin after re-exec, restore the matching wrapper and lock or refresh the
+bootstrap pins with a working Binloom binary. An invalid embedded version
+appears as `<missing or invalid>`.
+
+```text
+error: unsupported operating system: <os>. Supported hosts: macos or linux on aarch64 or x86_64.
+error: unsupported architecture: <arch>. Supported hosts: macos or linux on aarch64 or x86_64.
+error: binloom.lock not found. Run 'binloom update' to generate the lock, or 'binloom init' to set up the project.
+error: missing [binloom.artifacts.<os>-<arch>] in binloom.lock. The wrapper selects Binloom's own artifact by OS+arch only (no libc detection or fallback). Re-lock with 'binloom update --self' using a Binloom release that publishes this artifact, or use a supported host with a locked artifact.
+error: Binloom wrapper checksum mismatch
+error: downloaded Binloom wrapper embeds version <downloaded-version>; lock requires <locked-version>
+error: Binloom wrapper still differs from its pin after replacement; refusing to replace it again
+```
+
+A working `binloom install` can warn about a missing host bootstrap artifact
+without failing tool installation.
+
+```text
+warning: binloom.lock is missing bootstrap artifact for <os>-<arch> (Binloom <locked-version>). Restore binloom.lock or run `binloom update --self` with a working Binloom binary.
+```
+
+Releases containing this change add a hint when a manifest or lock contains
+an unknown field or variant.
+
+```text
+<path> may use fields from a newer Binloom (this is Binloom <running-version>). Upgrade the pinned Binloom first by running `./binloomw update --self`, then retry
+```
+
+Already-published binaries that reject newer fields via `deny_unknown_fields`
+give a generic parse error. The hint cannot be added retroactively. Run the
+old wrapper's `update --self` with the existing v1 inputs before adding the
+fields.
 
 ## Manifest
 
@@ -293,7 +347,12 @@ binloom path
 - `update <tool>` selects that tool's latest stable release and preserves the
   other locked entries.
 - `update` without a name updates every tool, Binloom, and wrapper metadata.
-- `update --self` updates only Binloom and wrapper metadata.
+- `update --self` changes only the manifest's `[binloom]` version and the
+  lock's `[binloom]`, `[binloom.artifacts.*]`, and `[wrapper]` sections.
+  It preserves unrelated tool pins. A resolution failure leaves both files
+  byte-identical. Each file is replaced atomically, and if the lock
+  replacement fails, Binloom rolls back the manifest using its original
+  bytes.
 - `exec` prepends `.tools/.bin` to `PATH` for one process. It does not mutate
   the user's shell.
 - With `[platforms]`, `install` and declared-tool `exec` fail before
@@ -304,9 +363,9 @@ binloom path
 - Both file versions remain at 1. Changes to targets or asset patterns
   require regenerating the lock with `binloom update`. Neither `install`
   nor `exec` rewrites an existing lock. There is no migration command.
-  Older Binloom executables may reject explicit ABI IDs. Bootstrap and the
-  pinned Binloom and wrapper upgrade are tracked in
-  [#38](https://github.com/KyrboForge/binloom/issues/38).
+  Follow the [existing-project upgrade sequence](../README.md#upgrade-an-existing-project)
+  before adding explicit targets. The old wrapper uses the legacy bootstrap
+  fields to hand off to the new wrapper, which reads evolved v1 locks.
 - `update` resolves every tool for its full target set before replacing any
   file; lockfile and manifest writes are atomic. `update <tool>` refuses to run
   when `[platforms] targets` changed, because the whole lock must be
@@ -451,6 +510,22 @@ Known limits:
 - `bootstrap.sh` has no cache and fetches `SHA256SUMS` from the same release
   origin as the archive: it detects corruption, not a compromised release.
 - Windows is out of scope (#35).
+
+### Bootstrap test coverage
+
+`tests/bootstrap_lifecycle.rs` covers a first download verified with SHA-256
+and a second run offline, tampered cache repair online and refusal offline,
+wrong checksums and interrupted downloads, concurrent invocations, and
+recovery after a failed bootstrap upgrade by restoring the old lock and
+reusing the old cache. The tagged-wrapper fixtures start with the updated
+pin in the lock.
+
+On macOS arm64, the smoke test and compatibility matrix use the real host.
+The Linux GNU, musl, and unsupported-host cases for this change use a stubbed
+`uname` or injected host values to exercise selection and errors. Windows
+and a public `binloom-core` are tracked separately in
+[#35](https://github.com/KyrboForge/binloom/issues/35) and
+[#41](https://github.com/KyrboForge/binloom/issues/41).
 
 ## Language independence
 
