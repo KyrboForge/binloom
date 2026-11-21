@@ -4,7 +4,7 @@
 - **Date:** 2026-11-17
 - **Decision owners:** Binloom maintainers
 - **Related:** [ADR-0001](0001-explicit-project-and-tool-targets.md), [#37](https://github.com/KyrboForge/binloom/issues/37), [#38](https://github.com/KyrboForge/binloom/issues/38), [#40](https://github.com/KyrboForge/binloom/issues/40)
-- **Implementation status:** Implemented by [#37](https://github.com/KyrboForge/binloom/issues/37) for all four explicit Linux GNU/musl targets. Windows is tracked in [#35](https://github.com/KyrboForge/binloom/issues/35), bootstrap and upgrades in [#38](https://github.com/KyrboForge/binloom/issues/38), and cross-platform CI fixtures in [#40](https://github.com/KyrboForge/binloom/issues/40).
+- **Implementation status:** Implemented by [#37](https://github.com/KyrboForge/binloom/issues/37) for all four explicit Linux GNU/musl targets. Windows is tracked in [#35](https://github.com/KyrboForge/binloom/issues/35) and cross-platform CI fixtures in [#40](https://github.com/KyrboForge/binloom/issues/40). [#38](https://github.com/KyrboForge/binloom/issues/38) implements pinned-wrapper upgrades with legacy bootstrap keys and evolved v1 locks.
 
 ## Context
 

@@ -152,7 +152,7 @@ impl GithubReleaseAsset {
 }
 
 impl GithubSource {
-    fn fetch_latest_release_from(
+    pub(crate) fn fetch_latest_release_from(
         &self,
         client: &Client,
         api_url: &str,

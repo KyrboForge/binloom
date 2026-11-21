@@ -354,11 +354,16 @@ mod tests {
                 host.target(&[gnu, musl], || Some(LinuxAbi::Musl)).unwrap(),
                 musl
             );
-            let error = host.target(&[gnu], || Some(LinuxAbi::Musl)).unwrap_err();
-            assert_eq!(
-                error.to_string(),
-                format!("this project does not support {musl}; [platforms] targets are {gnu}")
-            );
+            for (declared, actual, abi) in [(gnu, musl, LinuxAbi::Musl), (musl, gnu, LinuxAbi::Gnu)]
+            {
+                let error = host.target(&[declared], || Some(abi)).unwrap_err();
+                assert_eq!(
+                    error.to_string(),
+                    format!(
+                        "this project does not support {actual}; [platforms] targets are {declared}"
+                    )
+                );
+            }
             let error = host.target(&[gnu], || None).unwrap_err();
             assert!(error.to_string().contains("could not determine libc"));
             assert!(error.to_string().contains(&gnu.base_platform().to_string()));

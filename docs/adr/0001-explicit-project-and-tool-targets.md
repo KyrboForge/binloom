@@ -4,7 +4,7 @@
 - **Date:** 2026-11-17
 - **Decision owners:** Binloom maintainers
 - **Related:** [ADR-0002](0002-linux-gnu-and-musl-targets.md), [ADR-0003](0003-cli-first-internal-install-core.md), [#36](https://github.com/KyrboForge/binloom/issues/36), [#38](https://github.com/KyrboForge/binloom/issues/38), [#40](https://github.com/KyrboForge/binloom/issues/40)
-- **Implementation status:** Implemented by [#36](https://github.com/KyrboForge/binloom/issues/36) for the four legacy targets and by [#37](https://github.com/KyrboForge/binloom/issues/37) for explicit Linux GNU/musl targets. Windows is tracked in [#35](https://github.com/KyrboForge/binloom/issues/35), bootstrap and upgrades in [#38](https://github.com/KyrboForge/binloom/issues/38), and cross-platform CI fixtures in [#40](https://github.com/KyrboForge/binloom/issues/40).
+- **Implementation status:** Implemented by [#36](https://github.com/KyrboForge/binloom/issues/36) for the four legacy targets and by [#37](https://github.com/KyrboForge/binloom/issues/37) for explicit Linux GNU/musl targets. Windows is tracked in [#35](https://github.com/KyrboForge/binloom/issues/35) and cross-platform CI fixtures in [#40](https://github.com/KyrboForge/binloom/issues/40). [#38](https://github.com/KyrboForge/binloom/issues/38) implements pinned-wrapper upgrades with legacy bootstrap keys and evolved v1 locks.
 
 ## Context
 

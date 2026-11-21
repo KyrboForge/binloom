@@ -1,5 +1,5 @@
 use crate::{
-    common::{validate_tool_name, validate_version},
+    common::{newer_binloom_hint, parse_versioned_toml, validate_tool_name, validate_version},
     domain::{
         lockfile::Lockfile,
         platform::{Platform, canonical_targets},
@@ -8,8 +8,8 @@ use crate::{
 };
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
-use std::{collections::BTreeMap, fs, path::Path};
-use toml_edit::{DocumentMut, Item, Value};
+use std::{collections::BTreeMap, fs, ops::Range, path::Path};
+use toml_edit::{Document, Item, Value};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -77,11 +77,13 @@ impl TryFrom<&Path> for Manifest {
 
 impl Manifest {
     pub(crate) fn parse(content: &str, path: &Path) -> Result<Self> {
-        let mut manifest: Self = toml::from_str(content)
-            .with_context(|| format!("failed to parse {}", path.display()))?;
+        let mut manifest: Self = parse_versioned_toml(content, path, "manifest-version")?;
 
         if manifest.version != 1 {
-            bail!("unsupported manifest version: {}", manifest.version);
+            return Err(
+                anyhow::anyhow!("unsupported manifest version: {}", manifest.version)
+                    .context(newer_binloom_hint(path)),
+            );
         }
         validate_version(&manifest.binloom.version).context("invalid Binloom version")?;
 
@@ -173,33 +175,45 @@ pub(crate) fn render_versions<'a>(
     binloom: Option<&str>,
     tools: impl IntoIterator<Item = (&'a str, &'a str)>,
 ) -> Result<String> {
-    let content =
+    let mut content =
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let mut document = content
-        .parse::<DocumentMut>()
+    let document = Document::parse(content.as_str())
         .with_context(|| format!("failed to edit {}", path.display()))?;
+    let mut edits = Vec::new();
 
     if let Some(version) = binloom {
-        set_version(&mut document["binloom"]["version"], version)?;
+        record_version_edit(document.as_table().get("binloom"), version, &mut edits)?;
     }
     for (name, version) in tools {
-        set_version(&mut document["tools"][name]["version"], version)?;
+        let tool = document
+            .as_table()
+            .get("tools")
+            .and_then(|table| table.get(name));
+        record_version_edit(tool, version, &mut edits)?;
     }
 
-    Ok(document.to_string())
+    edits.sort_by_key(|(span, _)| std::cmp::Reverse(span.start));
+    for (span, replacement) in edits {
+        content.replace_range(span, &replacement.to_string());
+    }
+    Ok(content)
 }
 
-fn set_version(item: &mut Item, version: &str) -> Result<()> {
-    let value = item
-        .as_value_mut()
-        .context("manifest version must be a string")?;
-    if !matches!(value, Value::String(_)) {
-        bail!("manifest version must be a string");
+fn record_version_edit(
+    owner: Option<&Item>,
+    version: &str,
+    edits: &mut Vec<(Range<usize>, Value)>,
+) -> Result<()> {
+    let item = owner
+        .and_then(|table| table.get("version"))
+        .context("manifest version is missing")?;
+    let current = item.as_str().context("manifest version must be a string")?;
+    if current != version {
+        edits.push((
+            item.span().context("missing manifest version span")?,
+            Value::from(version),
+        ));
     }
-
-    let decor = value.decor().clone();
-    *value = Value::from(version);
-    *value.decor_mut() = decor;
     Ok(())
 }
 
@@ -314,7 +328,7 @@ version = "0.1.0"
 
         let error = Manifest::try_from(path.as_path()).unwrap_err();
 
-        assert_eq!(error.to_string(), "unsupported manifest version: 2");
+        assert!(format!("{error:#}").contains("unsupported manifest version: 2"));
     }
 
     #[test]
@@ -342,6 +356,42 @@ source = "github:evilmartians/lefthook"
         assert!(content.contains("# project tools"));
         assert!(content.contains("version = \"0.1.1\" # wrapper"));
         assert!(content.contains("version = \"2.1.11\" # hooks"));
+    }
+
+    #[test]
+    fn future_manifest_schema_errors_suggest_upgrading_binloom() {
+        let path = Path::new("binloom.toml");
+        for (content, cause) in [
+            (
+                "manifest-version = 1\nfuture-field = true\n[binloom]\nversion = '1.0.0'\n",
+                "unknown field",
+            ),
+            (
+                "manifest-version = 2\n[binloom]\nversion = '1.0.0'\n",
+                "unsupported manifest version: 2",
+            ),
+            ("manifest-version = 2\n", "missing field `binloom`"),
+        ] {
+            let error = format!("{:#}", Manifest::parse(content, path).unwrap_err());
+            assert!(error.contains(cause), "{error}");
+            assert!(error.contains("binloom.toml"), "{error}");
+            assert!(error.contains(env!("CARGO_PKG_VERSION")), "{error}");
+            assert!(error.contains("./binloomw update --self"), "{error}");
+        }
+        let error = format!("{:#}", Manifest::parse("[", path).unwrap_err());
+        assert!(!error.contains("./binloomw update --self"), "{error}");
+    }
+
+    #[test]
+    fn version_edit_preserves_unrelated_manifest_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("binloom.toml");
+        let original = "manifest-version = 1\r\n[binloom]\r\nversion = '1.0.0' # pin\r\n\r\n[tools.matrix]\r\nversion = '2.0.0'\r\nsource  =  'github:owner/tool'";
+        fs::write(&path, original).unwrap();
+        assert_eq!(
+            render_versions(&path, Some("1.1.0"), []).unwrap(),
+            original.replace("'1.0.0'", "\"1.1.0\"")
+        );
     }
 
     #[test]

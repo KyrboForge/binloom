@@ -92,6 +92,7 @@ pub(super) fn install_from(
         "no tools in binloom.lock"
     );
 
+    let bootstrap_key = host.base_platform().to_string();
     if let Some(binloom) = &lockfile.binloom {
         let cached = root
             .join(TOOLS_DIR)
@@ -99,7 +100,8 @@ pub(super) fn install_from(
             .join(&binloom.version)
             .join("binloom");
         let link = root.join(TOOLS_DIR).join(".bin/binloom");
-        if !cached.is_file()
+        if binloom.artifacts.contains_key(&bootstrap_key)
+            && !cached.is_file()
             && let (Ok(executable), Ok(link_target)) = (
                 std::env::current_exe().and_then(|path| path.canonicalize()),
                 link.canonicalize(),
@@ -142,8 +144,8 @@ pub(super) fn install_from(
             check_cache_directory(path)?;
         }
         // The wrapper still pins Binloom itself by its legacy bootstrap keys.
-        let bootstrap_key = host.base_platform().to_string();
-        let matches = match binloom.artifacts.get(&bootstrap_key) {
+        let artifact = binloom.artifacts.get(&bootstrap_key);
+        let matches = match artifact {
             // The POSIX wrapper writes the Binloom bootstrap cache; its marker alone is not
             // trusted, so the executable is verified like any other locked artifact.
             Some(artifact) => cached_executable_matches(
@@ -164,10 +166,17 @@ pub(super) fn install_from(
                 fs::remove_file(&link)
                     .with_context(|| format!("failed to remove {}", link.display()))?;
             }
-            eprintln!(
-                "warning: Binloom {} from binloom.lock is not cached; run ./binloomw install",
-                binloom.version
-            );
+            if artifact.is_some() {
+                eprintln!(
+                    "warning: Binloom {} from binloom.lock is not cached; run ./binloomw install",
+                    binloom.version
+                );
+            } else {
+                eprintln!(
+                    "warning: binloom.lock is missing bootstrap artifact for {bootstrap_key} (Binloom {}). Restore binloom.lock or run `binloom update --self` with a working Binloom binary.",
+                    binloom.version
+                );
+            }
         }
     }
 
@@ -1699,6 +1708,45 @@ targets = ["{secondary}"]
         assert_eq!(server.requests().len(), 1);
         assert_eq!(fs::read(root.join(MANIFEST)).unwrap(), manifest);
         assert_eq!(fs::read(root.join(LOCKFILE)).unwrap(), lock);
+    }
+
+    #[test]
+    fn simulated_explicit_linux_install_selects_only_the_matching_abi() {
+        use crate::domain::platform::LinuxAbi;
+        for (abi, selected, excluded) in [
+            (LinuxAbi::Gnu, "tool", "arm"),
+            (LinuxAbi::Musl, "arm", "tool"),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path();
+            let binary = b"fixture for the selected ABI";
+            let server = Server::start(vec![Response {
+                status: 200,
+                body: binary.to_vec(),
+            }]);
+            write_explicit_project(
+                root,
+                server.url(),
+                &checksum(binary),
+                Platform::LinuxX86_64Gnu,
+                Platform::LinuxX86_64Musl,
+            );
+            let host = Host {
+                os: "linux",
+                arch: "x86_64",
+            };
+            install_from(root, &download::client(), |targets| {
+                host.target(targets, || Some(abi))
+            })
+            .unwrap();
+            assert_eq!(
+                fs::read(root.join(".tools/.bin").join(selected)).unwrap(),
+                binary
+            );
+            assert!(!root.join(".tools").join(excluded).exists());
+            assert_eq!(server.requests().len(), 1);
+            assert_eq!(server.requests()[0].path, format!("/{selected}"));
+        }
     }
 
     #[test]

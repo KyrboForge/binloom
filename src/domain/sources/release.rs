@@ -449,6 +449,7 @@ impl Release {
         client: &Client,
         asset: &ReleaseAsset,
         cache: &mut BTreeMap<String, String>,
+        require_valid_sidecar: bool,
     ) -> anyhow::Result<Option<String>> {
         let exact_names = [
             format!("{}.sha256", asset.name),
@@ -482,6 +483,12 @@ impl Release {
                 if let Some(checksum) = Self::checksum_from_text(content, &asset.name, is_exact) {
                     return Ok(Some(checksum));
                 }
+                anyhow::ensure!(
+                    !require_valid_sidecar,
+                    "invalid SHA-256 sidecar {} for {}",
+                    checksum_asset.name,
+                    asset.name
+                );
             }
         }
 
@@ -836,7 +843,7 @@ mod tests {
 
         assert_eq!(
             release
-                .checksum_from_sidecar(&client, &release.assets[0], &mut BTreeMap::new())
+                .checksum_from_sidecar(&client, &release.assets[0], &mut BTreeMap::new(), false)
                 .unwrap(),
             None
         );

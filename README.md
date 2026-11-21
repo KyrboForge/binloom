@@ -103,11 +103,13 @@ Contributors only need the committed files:
 ./binloomw exec lefthook -- run pre-commit
 ```
 
-`binloomw` downloads the Binloom version pinned for the current platform,
+`binloomw` downloads the Binloom version pinned for the host OS and CPU,
 verifies its SHA-256 checksum, caches it under
 `.tools/binloom/<version>/binloom`, and forwards the command. No global
 installation or shell setup is required. The cached binary is re-verified
-against `binloom.lock` on every run, not just when a marker file matches.
+against `binloom.lock` on every run. Linux release builds of Binloom are
+static musl and use the same bootstrap key on GNU and musl hosts. The Rust
+engine resolves managed tool targets separately.
 
 When a command names a declared tool, `binloomw exec` installs its pinned
 version on first use and re-hashes the cached executable (and its retained
@@ -355,17 +357,25 @@ unavailable declared tool never falls back to a same-named binary on `PATH`.
 A host outside the project targets fails before installation changes. See
 [Linux target detection](docs/design.md#linux-target-detection).
 
-Both file versions stay at 1. There is no migration command. `install` creates a
-missing lock from the manifest pins. `install` and `exec` leave existing locks
-intact. Run `binloom update` after changing targets or if `exec` needs a missing
-lock.
+Both file versions stay at 1. There is no migration command. A working
+`binloom install` can create a missing lock from the manifest pins.
+`./binloomw` needs an existing lock to bootstrap. `install` and `exec` leave
+existing locks intact. Run `binloom update` after changing targets or if
+`exec` needs a missing lock.
 
-Binloom releases before target support reject these fields. Upgrade the pinned
-Binloom and its wrapper first (`binloomw update --self`), commit, and only then
-add `[platforms]` and run `binloomw update` to regenerate the lock. The
-wrapper's own Binloom bootstrap still selects the legacy `linux-*` artifact
-keys and is not ABI-aware; see
-[#38](https://github.com/KyrboForge/binloom/issues/38).
+### Upgrade an existing project
+
+1. With the existing v1 files, run `./binloomw update --self`.
+2. Run `./binloomw --version` so the old wrapper picks up its new pin and
+   replaces itself. Commit `binloomw`, `binloom.lock`, and `binloom.toml`.
+3. Add `[platforms]` and any per-tool `targets`, then run `./binloomw update`.
+4. Run `./binloomw install`.
+
+Already-published binaries that predate the new fields reject them with a
+generic parse error. If you added the fields too early, restore the prior v1
+manifest and lock before upgrading the pin. See the
+[bootstrap model](docs/design.md#bootstrap-model) for artifact selection and
+[bootstrap diagnostics](docs/design.md#bootstrap-diagnostics) for recovery.
 
 ## 🧰 Commands
 
